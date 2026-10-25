@@ -19,22 +19,8 @@ pub fn provider(program: &Pubkey, market: &Pubkey, authority: &Pubkey) -> (Pubke
 pub fn model_metadata(program: &Pubkey, model: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"model_metadata", model.as_ref()], program)
 }
-pub fn bond(program: &Pubkey, model: &Pubkey, slot: u32) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[b"bond", model.as_ref(), &slot.to_le_bytes()], program)
-}
 pub fn vault(program: &Pubkey, user: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault", user.as_ref()], program)
-}
-pub fn receipt_case(program: &Pubkey, bucket: &Pubkey, epoch: i64, index: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[
-            b"receipt-case",
-            bucket.as_ref(),
-            &epoch.to_le_bytes(),
-            &index.to_le_bytes(),
-        ],
-        program,
-    )
 }
 pub fn associated_token(mint: &Pubkey, owner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(

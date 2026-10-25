@@ -179,7 +179,6 @@ impl Authorization {
         ensure(
             self.booking == booking
                 && state.status == BookingStatus::Reserved
-                && !state.is_receipt_case
                 && state.market == market
                 && state.provider == provider
                 && state.owner == self.owner

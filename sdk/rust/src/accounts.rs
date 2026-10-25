@@ -11,12 +11,12 @@ pub const PROVIDER_LEN: usize = 364;
 pub const MODEL_METADATA_LEN: usize = 396;
 pub const USER_LEN: usize = 120;
 pub const BOOKING_LEN: usize = 368;
-pub const UNBOND_LEN: usize = 160;
 pub const HEADER_LEN: usize = 48;
 pub const TERMS_LEN: usize = 120;
 pub const CAPACITY_LEN: usize = 32;
 pub const MAX_ENTRIES: u32 = 4096;
-pub const RECEIPT_BUCKET_LEN: usize = 736;
+pub const LIST_HEADER_LEN: usize = 80;
+pub const LIST_SLOT_LEN: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RawAccount {
@@ -166,7 +166,6 @@ pub struct Provider {
     #[serde(with = "crate::serde_pubkey")]
     pub authority: Pubkey,
     pub document: DocumentRef,
-    pub approved: bool,
     pub bump: u8,
 }
 impl Decode for Provider {
@@ -177,7 +176,6 @@ impl Decode for Provider {
             market: key(d, 8),
             authority: key(d, 40),
             document: DocumentRef::decode(d, 72, 108)?,
-            approved: flag(d, 106)?,
             bump: d[107],
         };
         ensure(
@@ -281,19 +279,11 @@ pub struct Offer {
     pub provider: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
     pub payout: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub bond_vault: Pubkey,
     pub terms: OfferTerms,
-    pub approved: bool,
-    pub bond_bump: u8,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Capacity {
-    pub funded_bond: u64,
-    pub exposure: u64,
     pub active: u32,
-    pub obligations: u32,
-    pub pending_unbond: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TermsBook {
@@ -330,11 +320,10 @@ impl Decode for TermsBook {
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let (d, model, limit, count) = book(a, p, Self::MAGIC, TERMS_LEN)?;
         let mut entries = Vec::with_capacity(count);
-        for (slot, t) in d[48..48 + count * TERMS_LEN]
+        for t in d[48..48 + count * TERMS_LEN]
             .as_chunks::<TERMS_LEN>()
             .0
             .iter()
-            .enumerate()
         {
             let terms = OfferTerms {
                 rates: rates(t, 96),
@@ -344,17 +333,10 @@ impl Decode for TermsBook {
                 capacity: n32(t, 116),
             };
             terms.validate()?;
-            ensure(
-                address::bond(p, &model, slot as u32).1 == t[113],
-                "bond PDA bump",
-            )?;
             entries.push(Offer {
                 provider: key(t, 0),
                 payout: key(t, 32),
-                bond_vault: key(t, 64),
                 terms,
-                approved: flag(t, 112)?,
-                bond_bump: t[113],
             });
         }
         Ok(Self {
@@ -372,13 +354,7 @@ impl Decode for CapacityBook {
             .as_chunks::<CAPACITY_LEN>()
             .0
             .iter()
-            .map(|c| Capacity {
-                funded_bond: n64(c, 0),
-                exposure: n64(c, 8),
-                active: n32(c, 16),
-                obligations: n32(c, 20),
-                pending_unbond: n64(c, 24),
-            })
+            .map(|c| Capacity { active: n32(c, 16) })
             .collect();
         Ok(Self {
             model,
@@ -404,8 +380,6 @@ impl TermsBook {
 #[repr(u8)]
 pub enum BookingStatus {
     Reserved = 0,
-    Claimed = 1,
-    Disputed = 2,
     Released = 3,
     Finalized = 4,
     Available = 5,
@@ -423,7 +397,6 @@ pub struct Booking {
     pub max_input: u32,
     pub max_output: u32,
     pub claim_end: i64,
-    pub dispute_end: i64,
     pub status: BookingStatus,
     pub generation: u64,
     pub charge: u64,
@@ -438,12 +411,10 @@ pub struct Booking {
     #[serde(with = "crate::serde_pubkey")]
     pub payout: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
-    pub bond_vault: Pubkey,
+    pub provider_list: Pubkey,
     pub slot: u32,
-    pub bond_bump: u8,
     pub requested_privacy: bool,
     pub cache_allowed: bool,
-    pub is_receipt_case: bool,
     pub estimated_score: u64,
 }
 impl Decode for Booking {
@@ -452,14 +423,12 @@ impl Decode for Booking {
         let d = state(a, p, Self::MAGIC, BOOKING_LEN)?;
         let status = match d[148] {
             0 => BookingStatus::Reserved,
-            1 => BookingStatus::Claimed,
-            2 => BookingStatus::Disputed,
             3 => BookingStatus::Released,
             4 => BookingStatus::Finalized,
             5 => BookingStatus::Available,
             _ => return Err(crate::Error::Invalid("booking status")),
         };
-        ensure(d[359] == 0 || d[359] == 0xa5, "booking case marker")?;
+        ensure(d[359] == 0, "booking reserved marker")?;
         Ok(Self {
             owner: key(d, 8),
             provider: key(d, 40),
@@ -469,7 +438,6 @@ impl Decode for Booking {
             max_input: n32(d, 124),
             max_output: n32(d, 128),
             claim_end: i64le(d, 132),
-            dispute_end: i64le(d, 140),
             status,
             generation: n64(d, 152),
             charge: n64(d, 160),
@@ -483,110 +451,74 @@ impl Decode for Booking {
             model: key(d, 224),
             rent_payer: key(d, 256),
             payout: key(d, 288),
-            bond_vault: key(d, 320),
+            provider_list: key(d, 320),
             slot: n32(d, 352),
-            bond_bump: d[356],
             requested_privacy: flag(d, 357)?,
             cache_allowed: flag(d, 358)?,
-            is_receipt_case: d[359] == 0xa5,
             estimated_score: n64(d, 360),
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Unbond {
+pub struct ProviderList {
     #[serde(with = "crate::serde_pubkey")]
     pub market: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
-    pub provider: Pubkey,
-    pub amount: u64,
-    pub ready: i64,
-    pub executed: bool,
-    pub slot: u32,
-    #[serde(with = "crate::serde_pubkey")]
-    pub model: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub rent_payer: Pubkey,
+    pub authority: Pubkey,
+    pub limit: u32,
+    #[serde(serialize_with = "provider_keys")]
+    pub providers: Vec<Pubkey>,
 }
-impl Decode for Unbond {
-    const MAGIC: &'static [u8; 8] = b"UNBNDV20";
-    fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
-        let d = state(a, p, Self::MAGIC, UNBOND_LEN)?;
-        Ok(Self {
-            market: key(d, 8),
-            provider: key(d, 40),
-            amount: n64(d, 72),
-            ready: i64le(d, 80),
-            executed: flag(d, 88)?,
-            slot: n32(d, 92),
-            model: key(d, 96),
-            rent_payer: key(d, 128),
-        })
+impl ProviderList {
+    pub fn contains(&self, provider: &Pubkey) -> bool {
+        self.providers
+            .binary_search_by(|key| key.as_ref().cmp(provider.as_ref()))
+            .is_ok()
     }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ReceiptBucket {
-    #[serde(with = "crate::serde_pubkey")]
-    pub market: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub model: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub provider: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub bond_vault: Pubkey,
-    #[serde(with = "crate::serde_pubkey")]
-    pub rent_payer: Pubkey,
-    pub slot: u32,
-    pub bond_bump: u8,
-    pub finalized: bool,
-    pub epoch: i64,
-    pub epoch_end: i64,
-    pub dispute_end: i64,
-    pub count: u64,
-    pub charge: u64,
-    pub outstanding: u64,
-    pub frontier: [[u8; 32]; 16],
-}
-impl Decode for ReceiptBucket {
-    const MAGIC: &'static [u8; 8] = b"RECEIPT1";
+impl Decode for ProviderList {
+    const MAGIC: &'static [u8; 8] = b"LIST0V30";
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
-        let d = state(a, p, Self::MAGIC, RECEIPT_BUCKET_LEN)?;
-        let mut frontier = [[0; 32]; 16];
-        for (entry, bytes) in frontier.iter_mut().zip(d[224..].as_chunks::<32>().0.iter()) {
-            entry.copy_from_slice(bytes);
-        }
-        let v = Self {
+        ensure(a.data.len() >= LIST_HEADER_LEN, "provider list header")?;
+        let limit = n32(&a.data, 72);
+        let count = n32(&a.data, 76);
+        ensure(
+            (1..=MAX_ENTRIES).contains(&limit) && count <= limit,
+            "provider list capacity",
+        )?;
+        let d = state(
+            a,
+            p,
+            Self::MAGIC,
+            LIST_HEADER_LEN + limit as usize * LIST_SLOT_LEN,
+        )?;
+        let tree = LIST_HEADER_LEN + limit as usize * 32;
+        ensure(
+            d[LIST_HEADER_LEN + count as usize * 32..tree]
+                .iter()
+                .all(|&b| b == 0)
+                && d[tree + count as usize * 32..].iter().all(|&b| b == 0),
+            "provider list unused slots",
+        )?;
+        let providers: Vec<_> = d[80..80 + count as usize * 32]
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|key| Pubkey::new_from_array(*key))
+            .collect();
+        ensure(
+            providers
+                .windows(2)
+                .all(|keys| keys[0].as_ref() < keys[1].as_ref()),
+            "sorted unique providers",
+        )?;
+        Ok(Self {
             market: key(d, 8),
-            model: key(d, 40),
-            provider: key(d, 72),
-            bond_vault: key(d, 104),
-            rent_payer: key(d, 136),
-            slot: n32(d, 168),
-            bond_bump: d[172],
-            finalized: flag(d, 173)?,
-            epoch: i64le(d, 176),
-            epoch_end: i64le(d, 184),
-            dispute_end: i64le(d, 192),
-            count: n64(d, 200),
-            charge: n64(d, 208),
-            outstanding: n64(d, 216),
-            frontier,
-        };
-        ensure(
-            v.count < 65536 && v.outstanding <= v.count && v.epoch_end > v.epoch,
-            "receipt bucket counters",
-        )?;
-        ensure(
-            !v.finalized || (v.charge == 0 && v.outstanding == 0),
-            "finalized receipt liabilities",
-        )?;
-        ensure(
-            address::bond(p, &v.model, v.slot).1 == v.bond_bump,
-            "receipt bond bump",
-        )?;
-        Ok(v)
+            authority: key(d, 40),
+            limit,
+            providers,
+        })
     }
 }
 
@@ -620,4 +552,14 @@ impl TokenAccount {
             "token mint, authority or frozen state",
         )
     }
+}
+
+fn provider_keys<S: serde::Serializer>(
+    keys: &[Pubkey],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    keys.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .serialize(serializer)
 }

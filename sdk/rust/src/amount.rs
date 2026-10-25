@@ -49,11 +49,6 @@ impl Usage {
 pub fn fee(tokens: u32, rate: u32) -> u64 {
     (u64::from(tokens) * u64::from(rate)).div_ceil(UNIT)
 }
-pub fn collateral(exposure: u64) -> Result<u64> {
-    exposure
-        .checked_add(exposure.div_ceil(100))
-        .ok_or(Error::Arithmetic)
-}
 pub fn parse_atomic(value: &str) -> Result<u64> {
     ensure(
         !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()),

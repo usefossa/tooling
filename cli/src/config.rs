@@ -7,6 +7,8 @@ pub const API_URL: &str = "https://api.fossa.ag";
 pub const PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT");
 pub const MARKET: Pubkey = Pubkey::from_str_const("8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som");
+pub const PROVIDER_LIST: Pubkey =
+    Pubkey::from_str_const("CCgnXjgpVfNcFrZpFUYaepySTSfHxuqxPKej5D94zhc6");
 pub const USDC_MINT: Pubkey =
     Pubkey::from_str_const("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
@@ -34,6 +36,8 @@ pub struct Marketplace {
     pub program_id: Option<Pubkey>,
     #[serde(deserialize_with = "optional_pubkey")]
     pub market: Option<Pubkey>,
+    #[serde(deserialize_with = "optional_pubkey")]
+    pub provider_list: Option<Pubkey>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -59,7 +63,6 @@ pub struct Provider {
     pub private: Option<bool>,
     pub active: Option<bool>,
     pub model_book_limit: Option<u32>,
-    pub bond_target_atomic: Option<String>,
     pub models: Vec<Model>,
 }
 #[derive(Deserialize)]
@@ -75,7 +78,6 @@ pub struct Model {
     pub capacity: Option<u32>,
     pub private: Option<bool>,
     pub active: Option<bool>,
-    pub bond_target_atomic: Option<String>,
     pub slot: Option<u32>,
 }
 pub struct Config {
@@ -89,6 +91,7 @@ pub struct Config {
     pub wallet: Option<Pubkey>,
     pub program_id: Pubkey,
     pub market: Pubkey,
+    pub provider_list: Pubkey,
     pub mint: Pubkey,
     pub journal: PathBuf,
 }
@@ -162,6 +165,10 @@ impl Config {
                 .or(file.marketplace.program_id)
                 .unwrap_or(PROGRAM_ID),
             market: o.market.or(file.marketplace.market).unwrap_or(MARKET),
+            provider_list: o
+                .provider_list
+                .or(file.marketplace.provider_list)
+                .unwrap_or(PROVIDER_LIST),
             mint: o.usdc_mint.or(file.solana.usdc_mint).unwrap_or(USDC_MINT),
             file,
             base,

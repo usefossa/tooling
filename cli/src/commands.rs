@@ -22,13 +22,13 @@ pub async fn run(cli: Cli) -> Result<Value> {
         return Ok(document_view(&document(*kind, file)?));
     }
     let config = Config::load(&cli.options)?;
-    if matches!(cli.command, Command::Onboard { .. }) {
+    if matches!(cli.command, Command::Onboard) {
         validate_onboard(&config)?;
     }
     match &cli.command {
         Command::Config(ConfigCommand::Show) => {
             return Ok(
-                json!({"api_url":config.api_url,"rpc":if config.hosted_rpc { "hosted" } else if config.rpc_url.is_some() { "custom (URL redacted)" } else { "disabled" },"wallet":config.wallet.map(|w|w.to_string()),"keypair_configured":config.keypair.is_some(),"separate_payer":config.payer.is_some(),"journal_dir":config.journal,"program_id":config.program_id.to_string(),"market":config.market.to_string(),"usdc_mint":config.mint.to_string(),"mode":if cli.options.execute {"execute"} else {"plan"}}),
+                json!({"api_url":config.api_url,"rpc":if config.hosted_rpc { "hosted" } else if config.rpc_url.is_some() { "custom (URL redacted)" } else { "disabled" },"wallet":config.wallet.map(|w|w.to_string()),"keypair_configured":config.keypair.is_some(),"separate_payer":config.payer.is_some(),"journal_dir":config.journal,"program_id":config.program_id.to_string(),"market":config.market.to_string(),"provider_list":config.provider_list.to_string(),"usdc_mint":config.mint.to_string(),"mode":if cli.options.execute {"execute"} else {"plan"}}),
             );
         }
         Command::Metadata(MetadataCommand::Upload { kind, file }) => {
@@ -63,14 +63,11 @@ pub async fn run(cli: Cli) -> Result<Value> {
         Command::Provider(command) => provider(&rt, command).await,
         Command::Model(command) => model(&rt, command).await,
         Command::Offer(command) => offer(&rt, command).await,
-        Command::Bond(command) => bond(&rt, command).await,
+        Command::List(command) => provider_list(&rt, command).await,
         Command::Account(AccountCommand::Show { address, kind }) => {
             account(&rt, address, kind).await
         }
-        Command::Onboard {
-            allow_approval,
-            admin,
-        } => onboard(&rt, allow_approval, admin.as_deref()).await,
+        Command::Onboard => onboard(&rt).await,
         Command::User(command) => user(&rt, command).await,
         Command::Booking(command) => booking(&rt, command).await,
         _ => unreachable!(),
@@ -121,7 +118,7 @@ fn preflight(command: &Command) -> Result<()> {
             }
         }
         Command::Booking(BookingCommand::Create(args)) => {
-            book_request(args).validate()?;
+            book_request(args, crate::config::PROVIDER_LIST).validate()?;
         }
         _ => (),
     }
@@ -224,7 +221,13 @@ async fn provider(rt: &Runtime, command: ProviderCommand) -> Result<Value> {
             let ix = rt
                 .protocol
                 .initialize_provider(wallet, rt.payer()?, &reference)?;
-            rt.transact("register provider",vec![ix],&[],json!({"provider":address.to_string(),"metadata":reference_view(&reference),"approval":"requires market admin"})).await
+            rt.transact(
+                "register provider",
+                vec![ix],
+                &[],
+                json!({"provider":address.to_string(),"metadata":reference_view(&reference)}),
+            )
+            .await
         }
         ProviderCommand::Update(args) => {
             let state = state
@@ -305,6 +308,43 @@ async fn model(rt: &Runtime, command: ModelCommand) -> Result<Value> {
             Ok(
                 json!({"address":address.to_string(),"model":model,"metadata":metadata,"terms":terms,"capacity":capacity}),
             )
+        }
+        ModelCommand::Grow { model: args, limit } => {
+            let address = model_address(rt, &args.model)?;
+            let model = rt
+                .rpc
+                .require_account::<Model>(address, rt.protocol.program)
+                .await?;
+            if model.market != rt.protocol.market
+                || limit <= model.limit
+                || limit - model.limit > 85
+            {
+                return Err(Error::Input(
+                    "new limit must add 1 to 85 slots in this market".into(),
+                ));
+            }
+            let books = rt
+                .rpc
+                .multiple_accounts(&[model.terms, model.capacity])
+                .await?;
+            let terms_raw = books.value[0]
+                .as_ref()
+                .ok_or(fossa_sdk::Error::MissingAccount(model.terms))?;
+            let capacity_raw = books.value[1]
+                .as_ref()
+                .ok_or(fossa_sdk::Error::MissingAccount(model.capacity))?;
+            let terms = TermsBook::decode(&model.terms, terms_raw, &rt.protocol.program)?;
+            let capacity =
+                CapacityBook::decode(&model.capacity, capacity_raw, &rt.protocol.program)?;
+            terms.validate_pair(&capacity, &address, &model)?;
+            let [terms_size, capacity_size] = instruction::book_sizes(limit)?;
+            let (terms_rent, capacity_rent) =
+                tokio::try_join!(rt.rpc.rent(terms_size), rt.rpc.rent(capacity_size))?;
+            let rent = terms_rent
+                .saturating_sub(terms_raw.lamports)
+                .checked_add(capacity_rent.saturating_sub(capacity_raw.lamports))
+                .ok_or(fossa_sdk::Error::Arithmetic)?;
+            rt.transact("grow model books", vec![rt.protocol.grow_model(ModelKeys::from_account(address, &model), rt.payer()?, limit)?], &[], json!({"model":args.model,"previous_limit":model.limit,"limit":limit,"additional_rent_lamports":rent.to_string()})).await
         }
         ModelCommand::UpdateMetadata {
             model,
@@ -405,7 +445,6 @@ async fn offer_at(
         model: ModelKeys::from_account(address, &model),
         provider: wallet,
         payout: offer.payout,
-        bond_vault: offer.bond_vault,
         slot,
     };
     Ok((keys, offer, capacities.entries[slot as usize]))
@@ -426,54 +465,90 @@ async fn offer(rt: &Runtime, command: OfferCommand) -> Result<Value> {
         }
     }
 }
-async fn bond(rt: &Runtime, command: BondCommand) -> Result<Value> {
-    match command {
-        BondCommand::Fund {
-            offer,
-            amount,
-            source,
-        } => {
-            let (keys, _, _) = selected_offer(rt, &offer).await?;
-            let source = source
-                .unwrap_or_else(|| address::associated_token(&rt.protocol.mint, &keys.provider));
-            validate_token(rt, source, keys.provider).await?;
-            rt.transact("fund bond",vec![rt.protocol.fund_bond(keys,source,amount)?],&[],json!({"amount_atomic":amount.to_string(),"amount_usdc":amount::format_usdc(amount),"model":offer.model.model,"slot":keys.slot})).await
-        }
-        BondCommand::Request { offer, amount } => {
-            let (keys, _, _) = selected_offer(rt, &offer).await?;
-            let request = Keypair::new();
-            let request_address = request.pubkey();
-            let payer = rt.payer()?;
-            let ix = vec![
-                rt.protocol.create_account(
-                    payer,
-                    request.pubkey(),
-                    rt.rpc.rent(UNBOND_LEN).await?,
-                    UNBOND_LEN,
-                )?,
-                rt.protocol
-                    .request_unbond(keys, request.pubkey(), payer, amount)?,
-            ];
-            rt.transact("request unbond",ix,&[request],json!({"request":request_address.to_string(),"amount_atomic":amount.to_string(),"model":offer.model.model,"slot":keys.slot})).await
-        }
-        BondCommand::Execute { request } => {
-            let state = rt
-                .rpc
-                .require_account::<Unbond>(request, rt.protocol.program)
-                .await?;
-            if state.market != rt.protocol.market
-                || state.provider != rt.wallet()?
-                || state.executed
-            {
-                return Err(Error::Input(
-                    "unbond request binding or executed state invalid".into(),
-                ));
-            }
-            let (keys, _, _) = offer_at(rt, state.model, Some(state.slot)).await?;
-            rt.transact("execute unbond",vec![rt.protocol.execute_unbond(keys,request)],&[],json!({"request":request.to_string(),"amount_atomic":state.amount.to_string(),"ready":state.ready})).await
-        }
+async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
+    const COMPUTE_UNITS: u32 = 250_000;
+    if let ListCommand::Create { capacity } = command {
+        let list = Keypair::new();
+        let authority = rt.wallet()?;
+        let address = list.pubkey();
+        let size = instruction::list_size(capacity)?;
+        let rent = rt.rpc.rent(size).await?;
+        return rt.transact("create provider list", vec![
+            fossa_sdk::transaction::compute_unit_limit(COMPUTE_UNITS),
+            rt.protocol.create_account(rt.payer()?, list.pubkey(), rent, size)?,
+            rt.protocol.initialize_list(list.pubkey(), authority, capacity)?,
+        ], &[list], json!({"list":address.to_string(),"authority":authority.to_string(),"capacity":capacity})).await;
     }
+    let address = match command {
+        ListCommand::Show { list }
+        | ListCommand::Add { list, .. }
+        | ListCommand::Remove { list, .. }
+        | ListCommand::Close { list } => list,
+        _ => unreachable!(),
+    };
+    let state = rt
+        .rpc
+        .require_account::<ProviderList>(address, rt.protocol.program)
+        .await?;
+    if state.market != rt.protocol.market {
+        return Err(Error::Input("provider list market mismatch".into()));
+    }
+    if matches!(command, ListCommand::Show { .. }) {
+        return Ok(json!({"address":address.to_string(),"state":state}));
+    }
+    let authority = rt.wallet()?;
+    if state.authority != authority {
+        return Err(Error::Input(
+            "provider list belongs to another owner".into(),
+        ));
+    }
+    let (label, ix) = match command {
+        ListCommand::Add { provider, .. } => {
+            if state.contains(&provider) || state.providers.len() == state.limit as usize {
+                return Err(Error::Input("provider already listed or list full".into()));
+            }
+            (
+                "add listed provider",
+                rt.protocol.update_list(address, authority, provider, true),
+            )
+        }
+        ListCommand::Remove { provider, .. } => {
+            if !state.contains(&provider) {
+                return Err(Error::Input("provider is not listed".into()));
+            }
+            (
+                "remove listed provider",
+                rt.protocol.update_list(address, authority, provider, false),
+            )
+        }
+        ListCommand::Close { .. } => {
+            if !state.providers.is_empty() {
+                return Err(Error::Input("provider list must be empty".into()));
+            }
+            (
+                "close provider list",
+                rt.protocol.close_list(address, authority),
+            )
+        }
+        _ => unreachable!(),
+    };
+    let instructions = if matches!(command, ListCommand::Close { .. }) {
+        vec![ix]
+    } else {
+        vec![
+            fossa_sdk::transaction::compute_unit_limit(COMPUTE_UNITS),
+            ix,
+        ]
+    };
+    rt.transact(
+        label,
+        instructions,
+        &[],
+        json!({"list":address.to_string()}),
+    )
+    .await
 }
+
 async fn validate_token(rt: &Runtime, account: Pubkey, owner: Pubkey) -> Result<()> {
     let raw = rt
         .rpc
@@ -502,8 +577,7 @@ async fn account(rt: &Runtime, address: Pubkey, kind: AccountKind) -> Result<Val
         AccountKind::Terms => typed!(TermsBook),
         AccountKind::Capacity => typed!(CapacityBook),
         AccountKind::Booking => typed!(Booking),
-        AccountKind::Unbond => typed!(Unbond),
-        AccountKind::ReceiptBucket => typed!(ReceiptBucket),
+        AccountKind::ProviderList => typed!(ProviderList),
         AccountKind::Token => serde_json::to_value(TokenAccount::decode(
             &rt.rpc
                 .raw_account(address)
@@ -642,8 +716,7 @@ async fn booking(rt: &Runtime, command: BookingCommand) -> Result<Value> {
         BookingCommand::Show { booking }
         | BookingCommand::Claim { booking, .. }
         | BookingCommand::Release { booking }
-        | BookingCommand::Expire { booking }
-        | BookingCommand::Finalize { booking } => booking,
+        | BookingCommand::Expire { booking } => booking,
         BookingCommand::Create(_) => unreachable!(),
     };
     if matches!(command, BookingCommand::Show { .. }) {
@@ -685,25 +758,22 @@ async fn booking(rt: &Runtime, command: BookingCommand) -> Result<Value> {
             if state.provider != rt.wallet()? {
                 return Err(Error::Input("booking belongs to another provider".into()));
             }
-            if generation.is_some() {
-                return Err(Error::Input("reusable booking claims require receipt publication; use the SDK receipt workflow".into()));
-            }
             if u64::from(uncached) + u64::from(cached) > u64::from(state.max_input)
                 || output > state.max_output
             {
                 return Err(Error::Input("usage exceeds booking token caps".into()));
             }
+            let usage = Usage {
+                uncached,
+                cached,
+                output,
+            };
+            let receipt = generation
+                .map(|_| fossa_sdk::receipt::Receipt::from_booking(address, &state, usage))
+                .transpose()?;
             (
                 "claim booking",
-                rt.protocol.claim(
-                    keys,
-                    Usage {
-                        uncached,
-                        cached,
-                        output,
-                    },
-                    None,
-                )?,
+                rt.protocol.claim(keys, usage, receipt.as_ref())?,
             )
         }
         BookingCommand::Release { .. } => {
@@ -713,9 +783,6 @@ async fn booking(rt: &Runtime, command: BookingCommand) -> Result<Value> {
             ("release booking", rt.protocol.release(keys, generation)?)
         }
         BookingCommand::Expire { .. } => ("expire booking", rt.protocol.expire(keys, generation)?),
-        BookingCommand::Finalize { .. } => {
-            ("finalize booking", rt.protocol.finalize(model, address))
-        }
         _ => unreachable!(),
     };
     rt.transact(
@@ -726,7 +793,7 @@ async fn booking(rt: &Runtime, command: BookingCommand) -> Result<Value> {
     )
     .await
 }
-async fn onboard(rt: &Runtime, allow_approval: bool, admin_path: Option<&Path>) -> Result<Value> {
+async fn onboard(rt: &Runtime) -> Result<Value> {
     let cfg = &rt.config.file.provider;
     let file = cfg
         .metadata_file
@@ -765,43 +832,22 @@ async fn onboard(rt: &Runtime, allow_approval: bool, admin_path: Option<&Path>) 
             active: model.active.or(cfg.active).unwrap_or(true),
         };
         terms.validate()?;
-        let bond_target = amount::parse_atomic(
-            model
-                .bond_target_atomic
-                .as_deref()
-                .or(cfg.bond_target_atomic.as_deref())
-                .unwrap_or("0"),
-        )?;
         models.push(onboarding::ModelConfig {
             id: model.id.clone(),
             document: reference,
             terms,
-            bond_target,
             slot: model.slot,
         });
         documents.push((document, model.metadata_uri.as_deref()));
     }
-    let admin = admin_path
-        .map(fossa_sdk::transaction::read_keypair)
-        .transpose()?;
     let config = onboarding::OnboardConfig {
         provider: rt.wallet()?,
         payer: rt.payer()?,
-        admin: admin.as_ref().map(Signer::pubkey),
         document: reference,
         book_limit: cfg.model_book_limit.unwrap_or(16),
         models,
     };
-    let mut plan = onboarding::plan(&rt.rpc, &rt.protocol, &config).await?;
-    if !allow_approval
-        && plan.steps.iter().any(|step| {
-            step.instructions
-                .iter()
-                .any(|ix| ix.program_id == rt.protocol.program && ix.data.first() == Some(&20))
-        })
-    {
-        plan.blockers.push("provider approval requires explicit onboard --allow-approval and market admin signature".into());
-    }
+    let plan = onboarding::plan(&rt.rpc, &rt.protocol, &config).await?;
     let view = json!({"mode":"plan","operation":"onboard","blockers":plan.blockers,"steps":plan.steps.iter().map(|s|json!({"operation":s.label,"instructions":runtime::instruction_view(&s.instructions)})).collect::<Vec<_>>(),"metadata":documents.iter().map(|(d,_)|document_view(d)).collect::<Vec<_>>()});
     if !rt.options.execute {
         return Ok(view);
@@ -817,11 +863,7 @@ async fn onboard(rt: &Runtime, allow_approval: bool, admin_path: Option<&Path>) 
         publish(rt, doc, *uri).await?;
     }
     let mut completed = Vec::new();
-    for mut step in plan.steps {
-        if let Some(path) = admin_path {
-            step.signers
-                .push(fossa_sdk::transaction::read_keypair(path)?);
-        }
+    for step in plan.steps {
         completed.push(
             rt.transact(
                 &step.label,
@@ -835,9 +877,10 @@ async fn onboard(rt: &Runtime, allow_approval: bool, admin_path: Option<&Path>) 
     Ok(json!({"mode":"executed","operation":"onboard","steps":completed}))
 }
 
-fn book_request(args: &BookArgs) -> instruction::BookRequest {
+fn book_request(args: &BookArgs, default_list: Pubkey) -> instruction::BookRequest {
     instruction::BookRequest {
         model_id: address::model_id(&args.model.model),
+        provider_list: args.list.unwrap_or(default_list),
         rate_caps: Rates {
             input: args.input_price_cap,
             cached: args.cached_price_cap,
@@ -866,12 +909,22 @@ async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
     }
     let address = model_address(rt, &args.model.model)?;
     let (model, terms, capacity) = rt.rpc.model_books(&rt.protocol, address).await?;
-    let request = book_request(&args);
+    let list = rt
+        .rpc
+        .require_account::<ProviderList>(
+            args.list.unwrap_or(rt.config.provider_list),
+            rt.protocol.program,
+        )
+        .await?;
+    if list.market != rt.protocol.market {
+        return Err(Error::Input("provider list market mismatch".into()));
+    }
+    let request = book_request(&args, rt.config.provider_list);
     let selected = request
-        .select(&terms, &capacity, user.free)?
+        .select(&terms, &capacity, &list, user.free)?
         .ok_or_else(|| {
             Error::Input(
-                "no eligible offer fits price, speed, privacy, capacity, bond and balance limits"
+                "no eligible offer fits list, price, speed, privacy, capacity and balance limits"
                     .into(),
             )
         })?;
@@ -880,7 +933,7 @@ async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
     let payer = rt.payer()?;
     let ix = vec![
         fossa_sdk::transaction::compute_unit_limit(
-            12_000 + 200 * terms.entries.len().min(4096) as u32,
+            (20_000 + 500 * terms.entries.len().min(4096) as u32).min(1_400_000),
         ),
         rt.protocol
             .create_account(payer, booking, rt.rpc.rent(BOOKING_LEN).await?, BOOKING_LEN)?,
@@ -925,13 +978,6 @@ fn validate_onboard(config: &Config) -> Result<()> {
             active: model.active.or(provider.active).unwrap_or(true),
         }
         .validate()?;
-        amount::parse_atomic(
-            model
-                .bond_target_atomic
-                .as_deref()
-                .or(provider.bond_target_atomic.as_deref())
-                .unwrap_or("0"),
-        )?;
     }
     Ok(())
 }

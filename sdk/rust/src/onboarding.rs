@@ -1,8 +1,6 @@
 use crate::{
     Error, Instruction, Keypair, Pubkey, Result, RpcClient, Signer,
-    accounts::{
-        Capacity, Decode, DocumentRef, Model, ModelMetadata, OfferTerms, Provider, TokenAccount,
-    },
+    accounts::{Decode, DocumentRef, Model, ModelMetadata, OfferTerms, Provider},
     address, ensure,
     instruction::{InitializeModel, ModelKeys, OfferKeys, Protocol, create_associated_token},
 };
@@ -12,14 +10,12 @@ pub struct ModelConfig {
     pub id: String,
     pub document: DocumentRef,
     pub terms: OfferTerms,
-    pub bond_target: u64,
     pub slot: Option<u32>,
 }
 #[derive(Clone, Debug)]
 pub struct OnboardConfig {
     pub provider: Pubkey,
     pub payer: Pubkey,
-    pub admin: Option<Pubkey>,
     pub document: DocumentRef,
     pub book_limit: u32,
     pub models: Vec<ModelConfig>,
@@ -59,12 +55,7 @@ pub async fn plan(
         model.terms.validate()?;
         model.document.encode()?;
     }
-    let market = rpc.validate_market(protocol).await?;
-    if let Some(admin) = config.admin {
-        ensure(admin == market.admin, "market admin")?;
-    }
-    let can_admin = config.provider == market.admin || config.admin == Some(market.admin);
-    let extra_admin = (config.provider != market.admin && can_admin).then_some(market.admin);
+    rpc.validate_market(protocol).await?;
     let mut plan = OnboardingPlan {
         steps: vec![],
         blockers: vec![],
@@ -86,26 +77,13 @@ pub async fn plan(
             vec![protocol.initialize_provider(config.provider, config.payer, &config.document)?],
         ));
     }
-    let approved = profile.as_ref().is_some_and(|p| p.approved);
-    if !approved {
-        if can_admin {
-            plan.steps.push(PlanStep::new(
-                "approve provider",
-                vec![protocol.approve_provider(config.provider, market.admin, true)],
-            ));
-        } else {
-            plan.blockers
-                .push(format!("provider approval required from {}", market.admin));
-            return Ok(plan);
-        }
-    }
     let mut book_rent = None;
-    let mut source_checked = false;
     for desired in &config.models {
+        let mut growth = None;
         let id = address::model_id(&desired.id);
         let model_key = address::model(&protocol.program, &protocol.market, &id).0;
         let existing = rpc.account::<Model>(model_key, protocol.program).await?;
-        let (model, offer, capacity, slot) = if let Some(state) = existing {
+        let (model, offer, slot) = if let Some(state) = existing {
             ensure(
                 state.market == protocol.market && state.id == id,
                 "model binding",
@@ -166,41 +144,22 @@ pub async fn plan(
                     .unwrap_or(terms.entries.len()) as u32
             });
             ensure(
-                slot <= terms.entries.len() as u32 && slot < state.limit,
-                "offer slot or full book",
+                slot <= terms.entries.len() as u32 && slot < crate::accounts::MAX_ENTRIES,
+                "offer slot or maximum book capacity",
             )?;
             let offer = terms.entries.get(slot as usize).cloned();
             if let Some(offer) = &offer {
                 ensure(offer.provider == config.provider, "offer authority")?;
             }
-            if offer.is_none()
-                && terms.entries.iter().any(|o| o.provider == config.provider)
-                && !can_admin
-            {
-                plan.blockers.push(format!(
-                    "additional offer {} requires market admin",
-                    desired.id
-                ));
-                continue;
+            ensure(
+                offer.is_some() || !terms.entries.iter().any(|o| o.provider == config.provider),
+                "one offer per provider and model",
+            )?;
+            if slot == state.limit {
+                growth = Some(protocol.grow_model(keys, config.payer, state.limit + 1)?);
             }
-            (
-                keys,
-                offer,
-                capacities
-                    .entries
-                    .get(slot as usize)
-                    .copied()
-                    .unwrap_or_default(),
-                slot,
-            )
+            (keys, offer, slot)
         } else {
-            if !can_admin {
-                plan.blockers.push(format!(
-                    "model {} initialization requires market admin",
-                    desired.id
-                ));
-                continue;
-            }
             ensure(desired.slot.is_none_or(|n| n == 0), "new model offer slot")?;
             let terms = Keypair::new();
             let capacity = Keypair::new();
@@ -232,7 +191,6 @@ pub async fn plan(
                 model: keys,
                 provider: config.provider,
                 payer: config.payer,
-                admin: extra_admin,
                 id,
                 limit: config.book_limit,
                 document: &desired.document,
@@ -242,20 +200,14 @@ pub async fn plan(
                 instructions,
                 signers: vec![terms, capacity],
             });
-            (keys, None, Capacity::default(), 0)
+            (keys, None, 0)
         };
         let source = address::associated_token(&protocol.mint, &config.provider);
-        let authority = address::bond(&protocol.program, &model_key, slot).0;
-        let bond_vault = offer
-            .as_ref()
-            .map(|o| o.bond_vault)
-            .unwrap_or_else(|| address::associated_token(&protocol.mint, &authority));
         let payout = offer.as_ref().map(|o| o.payout).unwrap_or(source);
         let keys = OfferKeys {
             model,
             provider: config.provider,
             payout,
-            bond_vault,
             slot,
         };
         if let Some(offer) = &offer {
@@ -266,29 +218,14 @@ pub async fn plan(
                 ));
             }
         } else {
+            let mut instructions: Vec<_> = growth.into_iter().collect();
+            instructions.extend([
+                create_associated_token(config.payer, config.provider, protocol.mint),
+                protocol.register_offer(keys, desired.terms)?,
+            ]);
             plan.steps.push(PlanStep::new(
                 format!("register offer {}", desired.id),
-                vec![
-                    create_associated_token(config.payer, config.provider, protocol.mint),
-                    create_associated_token(config.payer, authority, protocol.mint),
-                    protocol.register_offer(keys, desired.terms, extra_admin)?,
-                ],
-            ));
-        }
-        if capacity.funded_bond < desired.bond_target {
-            let amount = desired.bond_target - capacity.funded_bond;
-            if !source_checked {
-                if let Some(account) = rpc.raw_account(source).await? {
-                    TokenAccount::decode(&account)?.validate(&protocol.mint, &config.provider)?;
-                }
-                source_checked = true;
-            }
-            plan.steps.push(PlanStep::new(
-                format!("fund bond {}: {amount} atomic units", desired.id),
-                vec![
-                    create_associated_token(config.payer, config.provider, protocol.mint),
-                    protocol.fund_bond(keys, source, amount)?,
-                ],
+                instructions,
             ));
         }
     }

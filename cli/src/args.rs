@@ -52,6 +52,14 @@ pub struct Options {
     /// Override the default market address
     #[arg(long, global = true, env = "FOSSA_MARKET", hide_env_values = true)]
     pub market: Option<Pubkey>,
+    /// Default provider list for bookings; a booking --list overrides this value
+    #[arg(
+        long,
+        global = true,
+        env = "FOSSA_PROVIDER_LIST",
+        hide_env_values = true
+    )]
+    pub provider_list: Option<Pubkey>,
     /// Override the default USDC mint
     #[arg(long, global = true, env = "FOSSA_USDC_MINT", hide_env_values = true)]
     pub usdc_mint: Option<Pubkey>,
@@ -70,16 +78,12 @@ pub enum Command {
     /// Inspect effective configuration without exposing RPC credentials
     #[command(subcommand, after_help = DOCS)]
     Config(ConfigCommand),
-    /// Reconcile configured provider, model metadata, offers and bond targets
+    /// Reconcile configured provider, model metadata and offers
     #[command(after_help = DOCS)]
-    Onboard {
-        /// Explicit permission for provider approval when market admin signs
-        #[arg(long)]
-        allow_approval: bool,
-        /// Optional market admin signer; required only for admin-owned operations
-        #[arg(long)]
-        admin: Option<PathBuf>,
-    },
+    Onboard,
+    /// Inspect and manage owner-controlled provider lists
+    #[command(subcommand, after_help = DOCS)]
+    List(ListCommand),
     /// Inspect and edit provider profile
     #[command(subcommand, after_help = DOCS)]
     Provider(ProviderCommand),
@@ -89,9 +93,6 @@ pub enum Command {
     /// Inspect offers; edit selected fields while preserving others
     #[command(subcommand, after_help = DOCS)]
     Offer(OfferCommand),
-    /// Fund bond or request/execute delayed unbonding
-    #[command(subcommand, after_help = DOCS)]
-    Bond(BondCommand),
     /// Validate exact document bytes offline or upload immutable metadata
     #[command(subcommand, after_help = DOCS)]
     Metadata(MetadataCommand),
@@ -122,7 +123,7 @@ pub enum ProviderCommand {
     /// Inspect provider PDA and committed metadata reference
     #[command(after_help = DOCS)]
     Show,
-    /// Register provider profile; approval remains a separate market-admin decision
+    /// Register provider profile without admission approval
     #[command(after_help = DOCS)]
     Register(DocumentArgs),
     /// Edit a verified existing profile, preserving unspecified fields and extensions
@@ -162,6 +163,15 @@ pub enum ModelCommand {
     /// Inspect model, books and metadata reference
     #[command(after_help = DOCS)]
     Show(ModelArg),
+    /// Increase permanent offer slots; any payer may fund rent for up to 85 new slots
+    #[command(after_help = DOCS)]
+    Grow {
+        #[command(flatten)]
+        model: ModelArg,
+        /// New total slot limit, at most 4096
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=4096))]
+        limit: u32,
+    },
     /// Change model metadata; signer must own model metadata authority
     #[command(after_help = DOCS)]
     UpdateMetadata {
@@ -221,31 +231,40 @@ pub struct OfferPatch {
     pub private: Option<bool>,
 }
 #[derive(Subcommand, Debug)]
-pub enum BondCommand {
-    /// Deposit USDC into selected offer bond vault
+pub enum ListCommand {
+    /// Read list authority and provider public keys
     #[command(after_help = DOCS)]
-    Fund {
-        #[command(flatten)]
-        offer: OfferArg,
-        #[arg(long, value_parser = parse_positive_usdc)]
-        amount: u64,
-        /// Source token account; defaults to provider USDC associated account
+    Show {
         #[arg(long)]
-        source: Option<Pubkey>,
+        list: Pubkey,
     },
-    /// Create a delayed unbond request; never decreases bond immediately
+    /// Create an empty provider list owned by the configured wallet
     #[command(after_help = DOCS)]
-    Request {
-        #[command(flatten)]
-        offer: OfferArg,
-        #[arg(long, value_parser = parse_positive_usdc)]
-        amount: u64,
+    Create {
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
+        capacity: u32,
     },
-    /// Execute an existing ready unbond request
+    /// Add a provider public key to your list
     #[command(after_help = DOCS)]
-    Execute {
+    Add {
         #[arg(long)]
-        request: Pubkey,
+        list: Pubkey,
+        #[arg(long)]
+        provider: Pubkey,
+    },
+    /// Remove a provider public key from your list
+    #[command(after_help = DOCS)]
+    Remove {
+        #[arg(long)]
+        list: Pubkey,
+        #[arg(long)]
+        provider: Pubkey,
+    },
+    /// Close your empty list and recover account rent
+    #[command(after_help = DOCS)]
+    Close {
+        #[arg(long)]
+        list: Pubkey,
     },
 }
 #[derive(Clone, Copy, ValueEnum, Debug)]
@@ -286,8 +305,7 @@ pub enum AccountKind {
     Terms,
     Capacity,
     Booking,
-    Unbond,
-    ReceiptBucket,
+    ProviderList,
     Token,
 }
 #[derive(Subcommand, Debug)]
@@ -358,7 +376,7 @@ pub enum BookingCommand {
         #[arg(long)]
         booking: Pubkey,
     },
-    /// Claim measured token usage for a one-shot booking; no inference is performed
+    /// Claim measured token usage and publish reusable booking receipt; no inference is performed
     #[command(after_help = DOCS)]
     Claim {
         #[arg(long)]
@@ -382,12 +400,6 @@ pub enum BookingCommand {
         #[arg(long)]
         booking: Pubkey,
     },
-    /// Finalize booking after its dispute deadline
-    #[command(after_help = DOCS)]
-    Finalize {
-        #[arg(long)]
-        booking: Pubkey,
-    },
 }
 pub fn parse_rate(value: &str) -> Result<u32, String> {
     amount::parse_usdc(value)
@@ -408,6 +420,9 @@ pub fn parse_positive_usdc(value: &str) -> Result<u64, String> {
 
 #[derive(Args, Debug)]
 pub struct BookArgs {
+    /// Provider list constraining cheapest eligible matching
+    #[arg(long)]
+    pub list: Option<Pubkey>,
     #[arg(long)]
     pub user: Pubkey,
     #[command(flatten)]

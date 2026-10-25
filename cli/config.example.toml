@@ -14,6 +14,8 @@ keypair = "provider-keypair.json"
 # rpc_url = "https://rpc.example.com"
 # usdc_mint = "REPLACE_WITH_PAYMENT_MINT"
 # [marketplace]
+# optional provider list for bookings; omit to use the default list
+# provider_list = "PROVIDER_LIST_ADDRESS"
 # program_id = "REPLACE_WITH_PROGRAM_PUBLIC_KEY"
 # market = "REPLACE_WITH_MARKET_PUBLIC_KEY"
 # [hosted]
@@ -31,7 +33,6 @@ capacity = 4
 private = false
 active = true
 model_book_limit = 16
-bond_target_atomic = "1000000"
 
 [[provider.models]]
 id = "example/model"
@@ -42,4 +43,3 @@ input_rate = 1000000
 cached_rate = 500000
 output_rate = 2000000
 # optional per-model overrides: speed_tps, capacity, private, active,
-# bond_target_atomic and slot. omitted fields inherit provider defaults.

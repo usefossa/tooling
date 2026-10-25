@@ -34,7 +34,7 @@ fn protocol() -> Protocol {
 }
 fn pending() -> PendingTransaction {
     let signer = signer();
-    let ix = protocol().approve_provider(key(5), signer.pubkey(), true);
+    let ix = protocol().update_list(key(5), signer.pubkey(), key(6), true);
     PreparedTransaction::new(
         &[ix],
         signer.pubkey(),
@@ -198,7 +198,7 @@ fn offline_signing_persistence_rejects_tampering_and_never_overwrites_journal() 
     assert!(bad.validate().is_err());
     let signer = signer();
     let unsigned = PreparedTransaction::new(
-        &[protocol().approve_provider(key(5), key(9), true)],
+        &[protocol().update_list(key(5), key(9), key(6), true)],
         signer.pubkey(),
         Hash::new_from_array([8; 32]),
         100,
@@ -206,7 +206,7 @@ fn offline_signing_persistence_rejects_tampering_and_never_overwrites_journal() 
     )
     .unwrap();
     assert!(unsigned.sign(&[&signer]).is_err());
-    let ix = protocol().approve_provider(key(5), signer.pubkey(), true);
+    let ix = protocol().update_list(key(5), signer.pubkey(), key(6), true);
     let prepared = PreparedTransaction::new(
         &[ix],
         signer.pubkey(),
@@ -273,7 +273,7 @@ async fn rpc_prepare_simulate_broadcast_and_resume_use_same_signed_bytes() {
     let signer = signer();
     let prepared = rpc
         .prepare(
-            &[protocol().approve_provider(key(5), signer.pubkey(), true)],
+            &[protocol().update_list(key(5), signer.pubkey(), key(6), true)],
             signer.pubkey(),
         )
         .await
@@ -394,7 +394,7 @@ async fn hosted_upload_and_rpc_sign_exact_bytes_and_fresh_nonces() {
 }
 
 #[tokio::test]
-async fn onboarding_plans_registration_then_requires_real_admin_approval() {
+async fn onboarding_registers_without_admission_approval() {
     let p = protocol();
     let admin = key(20);
     let mut data = vec![0; 72];
@@ -405,7 +405,6 @@ async fn onboarding_plans_registration_then_requires_real_admin_approval() {
     let config = onboarding::OnboardConfig {
         provider: key(10),
         payer: key(11),
-        admin: None,
         document: DocumentRef::new([1; 32], "https://example.com/provider.json").unwrap(),
         book_limit: 4,
         models: vec![],
@@ -415,11 +414,11 @@ async fn onboarding_plans_registration_then_requires_real_admin_approval() {
         .unwrap();
     assert_eq!(plan.steps.len(), 1);
     assert_eq!(plan.steps[0].instructions[0].data[0], 19);
-    assert_eq!(plan.blockers.len(), 1);
+    assert!(plan.blockers.is_empty());
 }
 
 #[tokio::test]
-async fn onboarding_reuses_book_rents_and_source_validation_within_one_plan() {
+async fn onboarding_reuses_book_rents_and_creates_permissionless_models() {
     let p = protocol();
     let provider = key(10);
     let mut market = b"FOSSAV20".to_vec();
@@ -441,7 +440,6 @@ async fn onboarding_reuses_book_rents_and_source_validation_within_one_plan() {
     let config = onboarding::OnboardConfig {
         provider,
         payer: provider,
-        admin: None,
         document: document.clone(),
         book_limit: 16,
         models: (0..3)
@@ -459,7 +457,6 @@ async fn onboarding_reuses_book_rents_and_source_validation_within_one_plan() {
                     private: false,
                     active: true,
                 },
-                bond_target: 100,
                 slot: None,
             })
             .collect(),
@@ -468,9 +465,9 @@ async fn onboarding_reuses_book_rents_and_source_validation_within_one_plan() {
         .await
         .unwrap();
     assert!(plan.blockers.is_empty());
-    assert_eq!(plan.steps.len(), 11);
+    assert_eq!(plan.steps.len(), 7);
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 8);
+    assert_eq!(calls.len(), 7);
     assert_eq!(
         calls
             .iter()
@@ -484,7 +481,7 @@ async fn onboarding_reuses_book_rents_and_source_validation_within_one_plan() {
             .iter()
             .filter(|(_, address)| address == &source)
             .count(),
-        1
+        0
     );
 }
 
@@ -530,7 +527,7 @@ fn inference_v1_v2_headers_verify_exact_body_owner_booking_and_deadline() {
         wrong.market = key(10);
         assert!(verified.verify_booking(address, &wrong, 500).is_err());
         wrong = state.clone();
-        wrong.is_receipt_case = true;
+        wrong.status = BookingStatus::Released;
         assert!(verified.verify_booking(address, &wrong, 500).is_err());
         assert!(verified.verify_booking(address, &state, 1000).is_err());
         assert!(decoded.verify_signature(&p, key(10), body).is_err());
@@ -732,7 +729,7 @@ async fn real_json_wire_uses_base58_keys_for_config_accounts_and_discovery() {
     data[..8].copy_from_slice(b"FOSSAV20");
     data[8..40].copy_from_slice(owner.as_ref());
     data[40..72].copy_from_slice(p.mint.as_ref());
-    let config:PublicConfig=serde_json::from_value(json!({"programId":p.program.to_string(),"market":p.market.to_string(),"usdcMint":p.mint.to_string(),"providerApi":"https://api.example.test","providerRpc":"https://api.example.test/v1/providers/rpc"})).unwrap();
+    let config:PublicConfig=serde_json::from_value(json!({"programId":p.program.to_string(),"market":p.market.to_string(),"providerList":key(30).to_string(),"usdcMint":p.mint.to_string(),"providerApi":"https://api.example.test","providerRpc":"https://api.example.test/v1/providers/rpc"})).unwrap();
     assert_eq!(config.protocol(), p);
     assert_eq!(
         serde_json::to_value(p).unwrap()["program"],
@@ -826,7 +823,7 @@ async fn blockhash_reuse_coalesces_refreshes_and_respects_slots_age_and_commitme
         let rpc = rpc.clone();
         tasks.spawn(async move {
             rpc.prepare_cached(
-                &[protocol().approve_provider(key(5), key(7), true)],
+                &[protocol().update_list(key(5), key(7), key(6), true)],
                 key(7),
                 0,
             )
@@ -838,7 +835,7 @@ async fn blockhash_reuse_coalesces_refreshes_and_respects_slots_age_and_commitme
         assert_eq!(result.unwrap().min_context_slot, 9);
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    let instructions = [protocol().approve_provider(key(5), key(7), true)];
+    let instructions = [protocol().update_list(key(5), key(7), key(6), true)];
     assert_eq!(
         rpc.prepare_cached(&instructions, key(7), 12)
             .await
@@ -869,7 +866,7 @@ async fn blockhash_reuse_coalesces_refreshes_and_respects_slots_age_and_commitme
 async fn cached_blockhash_rejects_stale_rpc_context() {
     let mock = spawn_mock(|_, _, body| rpc_response(body, json!({"context":{"slot":9},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}}))).await;
     let rpc = RpcClient::new(&mock.url).unwrap();
-    let ix = protocol().approve_provider(key(5), key(7), true);
+    let ix = protocol().update_list(key(5), key(7), key(6), true);
     assert!(rpc.prepare_cached(&[ix], key(7), 10).await.is_err());
 }
 
@@ -991,4 +988,131 @@ async fn processed_default_keeps_confirmed_opt_in_and_supported_history_commitme
             .await,
         Err(Error::Timeout)
     ));
+}
+
+#[tokio::test]
+async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_slot() {
+    for (limit, count, already_registered) in [
+        (4u32, 4u32, false),
+        (4, 3, false),
+        (4, 4, true),
+        (4096, 4096, false),
+    ] {
+        let p = protocol();
+        let provider = key(10);
+        let id = address::model_id("example/model");
+        let (model, bump) = address::model(&p.program, &p.market, &id);
+        let (metadata, meta_bump) = address::model_metadata(&p.program, &model);
+        let document = DocumentRef::new([1; 32], "https://example.com/model.json").unwrap();
+        let desired = OfferTerms {
+            rates: amount::Rates {
+                input: 1,
+                cached: 0,
+                output: 1,
+            },
+            speed_tps: 1,
+            private: false,
+            active: true,
+            capacity: 1,
+        };
+        let mut market = b"FOSSAV20".to_vec();
+        market.extend(key(20).as_ref());
+        market.extend(p.mint.as_ref());
+        let mut m = vec![0; MODEL_LEN];
+        m[..8].copy_from_slice(b"MODELV20");
+        for (at, value) in [(8, p.market), (72, key(30)), (104, key(31))] {
+            m[at..at + 32].copy_from_slice(value.as_ref());
+        }
+        m[40..72].copy_from_slice(&id);
+        m[136..140].copy_from_slice(&limit.to_le_bytes());
+        m[140] = bump;
+        let mut md = vec![0; MODEL_METADATA_LEN];
+        md[..8].copy_from_slice(b"MMETAV20");
+        for (at, value) in [(8, p.market), (40, model), (72, key(20))] {
+            md[at..at + 32].copy_from_slice(value.as_ref());
+        }
+        md[104..136].copy_from_slice(&document.sha256);
+        md[136..138].copy_from_slice(&(document.uri.len() as u16).to_le_bytes());
+        md[138] = meta_bump;
+        md[140..140 + document.uri.len()].copy_from_slice(document.uri.as_bytes());
+        let [ts, cs] = instruction::book_sizes(limit).unwrap();
+        let mut t = vec![0; ts];
+        let mut c = vec![0; cs];
+        for (bytes, magic) in [(&mut t, b"TERMSV20"), (&mut c, b"CAPACV20")] {
+            bytes[..8].copy_from_slice(magic);
+            bytes[8..40].copy_from_slice(model.as_ref());
+            bytes[40..44].copy_from_slice(&limit.to_le_bytes());
+            bytes[44..48].copy_from_slice(&count.to_le_bytes());
+        }
+        for slot in 0..count as usize {
+            let at = 48 + slot * 120;
+            let mut member = [7; 32];
+            member[..4].copy_from_slice(&(slot as u32).to_le_bytes());
+            t[at..at + 32].copy_from_slice(if already_registered && slot + 1 == count as usize {
+                provider.as_ref()
+            } else {
+                &member
+            });
+            t[at + 32..at + 64].copy_from_slice(key(40).as_ref());
+            t[at + 96..at + 112].copy_from_slice(&desired.encode().unwrap()[..16]);
+            t[at + 116..at + 120].copy_from_slice(&1u32.to_le_bytes());
+        }
+        let raw = |bytes: Vec<u8>| json!({"owner":p.program.to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
+        let (market, m, md, t, c) = (raw(market), raw(m), raw(md), raw(t), raw(c));
+        let mock=spawn_mock(move |_,_,body| {
+            let q:Value=serde_json::from_slice(body).unwrap();
+            let value=match q["method"].as_str().unwrap() {
+                "getAccountInfo"=>json!({"context":{"slot":1},"value":if q["params"][0]==p.market.to_string(){market.clone()}else if q["params"][0]==model.to_string(){m.clone()}else{Value::Null}}),
+                "getMultipleAccounts"=>{assert_eq!(q["params"][0][0],metadata.to_string());json!({"context":{"slot":1},"value":[md,t,c]})},
+                other=>panic!("unexpected {other}"),
+            }; rpc_response(body,value)
+        }).await;
+        let config = onboarding::OnboardConfig {
+            provider,
+            payer: key(11),
+            document: document.clone(),
+            book_limit: 4,
+            models: vec![onboarding::ModelConfig {
+                id: "example/model".into(),
+                document,
+                terms: desired,
+                slot: None,
+            }],
+        };
+        let plan = onboarding::plan(&RpcClient::new(&mock.url).unwrap(), &p, &config).await;
+        if limit == 4096 {
+            assert!(plan.is_err());
+            continue;
+        }
+        let plan = plan.unwrap();
+        assert!(plan.blockers.is_empty());
+        if already_registered {
+            assert_eq!(plan.steps.len(), 1);
+            continue;
+        }
+        let instructions = &plan.steps.last().unwrap().instructions;
+        let grows = count == limit;
+        assert_eq!(instructions.len(), if grows { 3 } else { 2 });
+        if grows {
+            assert_eq!(
+                instructions[0],
+                p.grow_model(
+                    instruction::ModelKeys {
+                        model,
+                        terms: key(30),
+                        capacity: key(31)
+                    },
+                    key(11),
+                    5
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(instructions.last().unwrap().data[0], 2);
+        assert_eq!(
+            &instructions.last().unwrap().data[1..5],
+            &count.to_le_bytes()
+        );
+        PreparedTransaction::new(instructions, key(11), Hash::default(), 100, 0).unwrap();
+    }
 }

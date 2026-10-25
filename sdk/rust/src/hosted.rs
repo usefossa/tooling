@@ -230,6 +230,8 @@ pub struct PublicConfig {
     #[serde(with = "crate::serde_pubkey")]
     pub market: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
+    pub provider_list: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
     pub usdc_mint: Pubkey,
     pub provider_api: Option<String>,
     pub provider_rpc: Option<String>,

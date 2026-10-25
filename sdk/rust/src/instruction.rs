@@ -1,10 +1,12 @@
 use crate::{
     AccountMeta, Instruction, Pubkey, Result,
-    accounts::{self, Booking, CapacityBook, DocumentRef, Model, OfferTerms, TermsBook, User},
+    accounts::{
+        self, Booking, CapacityBook, DocumentRef, Model, OfferTerms, ProviderList, TermsBook, User,
+    },
     address::{self, ASSOCIATED_TOKEN_PROGRAM, SYSTEM_PROGRAM, TOKEN_PROGRAM},
-    amount::{Rates, Usage, collateral},
+    amount::{Rates, Usage},
     ensure,
-    receipt::{Receipt, ReceiptProof},
+    receipt::Receipt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +54,6 @@ pub struct OfferKeys {
     pub model: ModelKeys,
     pub provider: Pubkey,
     pub payout: Pubkey,
-    pub bond_vault: Pubkey,
     pub slot: u32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +78,6 @@ impl SettlementKeys {
                 model,
                 provider: state.provider,
                 payout: state.payout,
-                bond_vault: state.bond_vault,
                 slot: state.slot,
             },
             user,
@@ -93,6 +93,8 @@ pub enum BookingMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookRequest {
     pub model_id: [u8; 32],
+    #[serde(with = "crate::serde_pubkey")]
+    pub provider_list: Pubkey,
     pub rate_caps: Rates,
     pub min_speed: u16,
     pub max_input: u32,
@@ -141,6 +143,7 @@ impl BookRequest {
         &self,
         terms: &TermsBook,
         capacity: &CapacityBook,
+        list: &ProviderList,
         free: u64,
     ) -> Result<Option<Selection>> {
         self.validate()?;
@@ -156,11 +159,10 @@ impl BookRequest {
             let t = offer.terms;
             let r = t.rates;
             if !t.active
-                || !offer.approved
+                || !list.contains(&offer.provider)
                 || (self.private && !t.private)
                 || u32::from(t.speed_tps) < min_speed
                 || cap.active >= t.capacity
-                || cap.obligations == u32::MAX
                 || r.input > self.rate_caps.input
                 || r.cached > self.rate_caps.cached
                 || r.output > self.rate_caps.output
@@ -184,17 +186,10 @@ impl BookRequest {
             if reserve > free.min(self.max_spend) {
                 continue;
             }
-            let Some(exposure) = cap.exposure.checked_add(reserve) else {
-                continue;
-            };
-            if !collateral(exposure).is_ok_and(|needed| cap.funded_bond >= needed) {
-                continue;
-            }
             best = Some(Selection {
                 slot: slot as u32,
                 reserve,
                 score,
-                exposure,
                 cache_allowed: offer.provider == self.cache_provider,
             });
             if score == 0 {
@@ -209,15 +204,7 @@ pub struct Selection {
     pub slot: u32,
     pub reserve: u64,
     pub score: u64,
-    pub exposure: u64,
     pub cache_allowed: bool,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClaimReceipt {
-    pub bucket: Pubkey,
-    pub epoch: i64,
-    pub index: u64,
-    pub receipt: Receipt,
 }
 
 fn r(key: Pubkey) -> AccountMeta {
@@ -231,14 +218,6 @@ fn s(key: Pubkey) -> AccountMeta {
 }
 fn ws(key: Pubkey) -> AccountMeta {
     AccountMeta::new(key, true)
-}
-fn slot_amount(slot: u32, amount: u64) -> Result<Vec<u8>> {
-    ensure(amount > 0, "positive amount")?;
-    Ok([
-        slot.to_le_bytes().as_slice(),
-        amount.to_le_bytes().as_slice(),
-    ]
-    .concat())
 }
 fn generation_payload(generation: Option<u64>) -> Result<Vec<u8>> {
     if let Some(n) = generation {
@@ -271,15 +250,10 @@ impl Protocol {
             vec![ws(user.user), s(user.owner), r(self.market), r(user.vault)],
         )
     }
-    pub fn register_offer(
-        &self,
-        k: OfferKeys,
-        terms: OfferTerms,
-        admin: Option<Pubkey>,
-    ) -> Result<Instruction> {
+    pub fn register_offer(&self, k: OfferKeys, terms: OfferTerms) -> Result<Instruction> {
         let mut data = k.slot.to_le_bytes().to_vec();
         data.extend(terms.encode()?);
-        let mut keys = vec![
+        let keys = vec![
             r(self.market),
             r(k.model.model),
             w(k.model.terms),
@@ -287,11 +261,7 @@ impl Protocol {
             r(address::provider(&self.program, &self.market, &k.provider).0),
             s(k.provider),
             r(k.payout),
-            r(k.bond_vault),
         ];
-        if let Some(admin) = admin {
-            keys.push(s(admin));
-        }
         Ok(self.ix(2, data, keys))
     }
     pub fn deposit(&self, u: UserKeys, source: Pubkey, amount: u64) -> Result<Instruction> {
@@ -305,23 +275,6 @@ impl Protocol {
                 s(u.owner),
                 w(source),
                 w(u.vault),
-                r(self.mint),
-                r(TOKEN_PROGRAM),
-            ],
-        ))
-    }
-    pub fn fund_bond(&self, k: OfferKeys, source: Pubkey, amount: u64) -> Result<Instruction> {
-        Ok(self.ix(
-            4,
-            slot_amount(k.slot, amount)?,
-            vec![
-                r(self.market),
-                r(k.model.model),
-                r(k.model.terms),
-                w(k.model.capacity),
-                s(k.provider),
-                w(source),
-                w(k.bond_vault),
                 r(self.mint),
                 r(TOKEN_PROGRAM),
             ],
@@ -374,6 +327,7 @@ impl Protocol {
                 s(u.owner),
                 booking_meta,
                 payer_meta,
+                r(request.provider_list),
             ],
         ))
     }
@@ -381,13 +335,13 @@ impl Protocol {
         &self,
         k: SettlementKeys,
         usage: Usage,
-        receipt: Option<&ClaimReceipt>,
+        receipt: Option<&Receipt>,
     ) -> Result<Instruction> {
         let o = k.offer;
         let u = k.user;
-        let mut p = Vec::with_capacity(156);
+        let mut p = Vec::with_capacity(140);
         usage.encode(&mut p);
-        let mut keys = vec![
+        let keys = vec![
             r(self.market),
             r(o.model.model),
             w(o.model.capacity),
@@ -402,28 +356,16 @@ impl Protocol {
         ];
         if let Some(c) = receipt {
             ensure(
-                c.receipt.owner == u.owner
-                    && c.receipt.user == u.user
-                    && c.receipt.booking == k.booking,
+                c.owner == u.owner && c.user == u.user && c.booking == k.booking,
                 "claim receipt binding",
             )?;
-            p.extend(generation_payload(Some(c.receipt.generation))?);
-            p.extend(c.epoch.to_le_bytes());
-            p.extend(c.index.to_le_bytes());
-            p.extend(c.receipt.encode());
-            keys.push(w(c.bucket));
+            p.extend(generation_payload(Some(c.generation))?);
+            p.extend(c.encode());
         }
         Ok(self.ix(7, p, keys))
     }
     pub fn expire(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
         Ok(self.ix(8, generation_payload(generation)?, self.settlement_keys(k)))
-    }
-    pub fn finalize(&self, m: ModelKeys, booking: Pubkey) -> Instruction {
-        self.ix(
-            9,
-            [],
-            vec![r(self.market), r(m.model), w(m.capacity), w(booking)],
-        )
     }
     pub fn withdraw(&self, u: UserKeys, destination: Pubkey, amount: u64) -> Result<Instruction> {
         ensure(amount > 0, "positive withdrawal")?;
@@ -442,92 +384,10 @@ impl Protocol {
             ],
         ))
     }
-    pub fn dispute(&self, m: ModelKeys, booking: Pubkey, owner: Pubkey) -> Instruction {
-        self.ix(
-            11,
-            [],
-            vec![r(self.market), r(m.model), w(booking), s(owner)],
-        )
-    }
-    pub fn resolve(&self, k: SettlementKeys, admin: Pubkey, refund: u64) -> Instruction {
-        let o = k.offer;
-        self.ix(
-            12,
-            refund.to_le_bytes(),
-            vec![
-                r(self.market),
-                r(o.model.model),
-                w(o.model.capacity),
-                w(k.user.user),
-                w(k.booking),
-                s(admin),
-                w(o.bond_vault),
-                w(k.user.vault),
-                r(self.mint),
-                r(address::bond(&self.program, &o.model.model, o.slot).0),
-                r(TOKEN_PROGRAM),
-            ],
-        )
-    }
-    pub fn request_unbond(
-        &self,
-        k: OfferKeys,
-        request: Pubkey,
-        rent_payer: Pubkey,
-        amount: u64,
-    ) -> Result<Instruction> {
-        Ok(self.ix(
-            13,
-            slot_amount(k.slot, amount)?,
-            vec![
-                r(self.market),
-                r(k.model.model),
-                r(k.model.terms),
-                w(k.model.capacity),
-                s(k.provider),
-                ws(request),
-                s(rent_payer),
-            ],
-        ))
-    }
-    pub fn execute_unbond(&self, k: OfferKeys, request: Pubkey) -> Instruction {
-        self.ix(
-            14,
-            [],
-            vec![
-                r(self.market),
-                r(k.model.model),
-                r(k.model.terms),
-                w(k.model.capacity),
-                w(request),
-                s(k.provider),
-                w(k.bond_vault),
-                w(k.payout),
-                r(self.mint),
-                r(address::bond(&self.program, &k.model.model, k.slot).0),
-                r(TOKEN_PROGRAM),
-            ],
-        )
-    }
     pub fn release(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
         let mut keys = self.settlement_keys(k);
         keys.push(s(k.offer.provider));
         Ok(self.ix(15, generation_payload(generation)?, keys))
-    }
-    pub fn approve_offer(
-        &self,
-        m: ModelKeys,
-        slot: u32,
-        admin: Pubkey,
-        approved: bool,
-    ) -> Instruction {
-        let mut p = slot.to_le_bytes().to_vec();
-        p.push(u8::from(approved));
-        self.ix(
-            16,
-            p,
-            vec![r(self.market), r(m.model), w(m.terms), s(admin)],
-        )
     }
     pub fn close(&self, account: Pubkey, rent_payer: Pubkey, reusable: bool) -> Instruction {
         self.ix(
@@ -546,7 +406,7 @@ impl Protocol {
         let mut p = k.id.to_vec();
         p.extend(k.limit.to_le_bytes());
         p.extend(k.document.encode()?);
-        let mut keys = vec![
+        let keys = vec![
             r(self.market),
             w(k.model.model),
             ws(k.model.terms),
@@ -557,9 +417,6 @@ impl Protocol {
             r(address::provider(&self.program, &self.market, &k.provider).0),
             w(address::model_metadata(&self.program, &k.model.model).0),
         ];
-        if let Some(admin) = k.admin {
-            keys.push(s(admin));
-        }
         Ok(self.ix(18, p, keys))
     }
     pub fn initialize_provider(
@@ -579,17 +436,6 @@ impl Protocol {
                 r(SYSTEM_PROGRAM),
             ],
         ))
-    }
-    pub fn approve_provider(&self, provider: Pubkey, admin: Pubkey, approved: bool) -> Instruction {
-        self.ix(
-            20,
-            [u8::from(approved)],
-            vec![
-                r(self.market),
-                w(address::provider(&self.program, &self.market, &provider).0),
-                s(admin),
-            ],
-        )
     }
     pub fn update_provider_metadata(
         &self,
@@ -623,62 +469,6 @@ impl Protocol {
             ],
         ))
     }
-    pub fn initialize_receipt_bucket(
-        &self,
-        m: ModelKeys,
-        params: InitializeReceiptBucket,
-    ) -> Result<Instruction> {
-        ensure(
-            (1..=1800).contains(&params.duration),
-            "receipt bucket duration",
-        )?;
-        let mut p = params.slot.to_le_bytes().to_vec();
-        p.extend(params.duration.to_le_bytes());
-        if let Some(epoch) = params.epoch {
-            p.extend(epoch.to_le_bytes());
-        }
-        Ok(self.ix(
-            23,
-            p,
-            vec![
-                r(self.market),
-                r(m.model),
-                r(m.terms),
-                AccountMeta::new(params.bucket, params.fresh),
-                s(params.payer),
-            ],
-        ))
-    }
-    pub fn finalize_receipt_bucket(&self, m: ModelKeys, bucket: Pubkey) -> Instruction {
-        self.ix(
-            24,
-            [],
-            vec![r(self.market), r(m.model), w(m.capacity), w(bucket)],
-        )
-    }
-    pub fn dispute_receipt(
-        &self,
-        model: Pubkey,
-        bucket: Pubkey,
-        payer: Pubkey,
-        proof: &ReceiptProof,
-    ) -> Result<Instruction> {
-        let p = proof.encode()?;
-        let case = address::receipt_case(&self.program, &bucket, proof.epoch, proof.index).0;
-        Ok(self.ix(
-            25,
-            p,
-            vec![
-                r(self.market),
-                r(model),
-                w(bucket),
-                w(case),
-                s(proof.receipt.owner),
-                ws(payer),
-                r(SYSTEM_PROGRAM),
-            ],
-        ))
-    }
     pub fn initialize_reusable_booking(
         &self,
         u: UserKeys,
@@ -691,13 +481,50 @@ impl Protocol {
             vec![r(self.market), r(u.user), s(u.owner), ws(booking), s(payer)],
         )
     }
-    pub fn close_receipt_bucket(
+    pub fn initialize_list(
         &self,
-        bucket: Pubkey,
-        rent_payer: Pubkey,
+        list: Pubkey,
         authority: Pubkey,
+        limit: u32,
+    ) -> Result<Instruction> {
+        list_size(limit)?;
+        Ok(self.ix(
+            28,
+            limit.to_le_bytes(),
+            vec![r(self.market), ws(list), s(authority)],
+        ))
+    }
+    pub fn update_list(
+        &self,
+        list: Pubkey,
+        authority: Pubkey,
+        provider: Pubkey,
+        included: bool,
     ) -> Instruction {
-        self.ix(27, [], vec![w(bucket), w(rent_payer), s(authority)])
+        let mut payload = provider.to_bytes().to_vec();
+        payload.push(u8::from(included));
+        self.ix(29, payload, vec![r(self.market), w(list), s(authority)])
+    }
+    pub fn close_list(&self, list: Pubkey, authority: Pubkey) -> Instruction {
+        self.ix(30, [], vec![w(list), ws(authority)])
+    }
+    pub fn grow_model(&self, model: ModelKeys, payer: Pubkey, limit: u32) -> Result<Instruction> {
+        ensure(
+            (2..=accounts::MAX_ENTRIES).contains(&limit),
+            "new model book limit",
+        )?;
+        Ok(self.ix(
+            32,
+            limit.to_le_bytes(),
+            vec![
+                r(self.market),
+                w(model.model),
+                w(model.terms),
+                w(model.capacity),
+                ws(payer),
+                r(SYSTEM_PROGRAM),
+            ],
+        ))
     }
     fn settlement_keys(&self, k: SettlementKeys) -> Vec<AccountMeta> {
         vec![
@@ -723,19 +550,9 @@ pub struct InitializeModel<'a> {
     pub model: ModelKeys,
     pub provider: Pubkey,
     pub payer: Pubkey,
-    pub admin: Option<Pubkey>,
     pub id: [u8; 32],
     pub limit: u32,
     pub document: &'a DocumentRef,
-}
-#[derive(Clone, Copy, Debug)]
-pub struct InitializeReceiptBucket {
-    pub bucket: Pubkey,
-    pub payer: Pubkey,
-    pub slot: u32,
-    pub duration: u32,
-    pub epoch: Option<i64>,
-    pub fresh: bool,
 }
 pub fn book_sizes(limit: u32) -> Result<[usize; 2]> {
     ensure(
@@ -778,4 +595,12 @@ pub fn create_associated_token(payer: Pubkey, owner: Pubkey, mint: Pubkey) -> In
         ],
         data: vec![1],
     }
+}
+
+pub fn list_size(limit: u32) -> Result<usize> {
+    ensure(
+        (1..=accounts::MAX_ENTRIES).contains(&limit),
+        "provider list capacity",
+    )?;
+    Ok(accounts::LIST_HEADER_LEN + limit as usize * accounts::LIST_SLOT_LEN)
 }
