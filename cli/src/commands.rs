@@ -109,6 +109,34 @@ fn preflight(command: &Command) -> Result<()> {
             model_document(&model.model, &args.metadata_file)?;
             validate_uri(args.metadata_uri.as_deref())?;
         }
+        Command::List(ListCommand::Create {
+            metadata_file,
+            metadata_uri,
+            ..
+        }) => {
+            if let Some(path) = metadata_file {
+                document(MetadataKind::List, path)?;
+            }
+            validate_uri(metadata_uri.as_deref())?;
+        }
+        Command::List(ListCommand::Update { profile, .. }) => {
+            if let Some(path) = &profile.metadata_file {
+                document(MetadataKind::List, path)?;
+            }
+            if let Some(path) = &profile.image_file {
+                image(path)?;
+            }
+            if let Some(path) = &profile.icon_file {
+                icon(path)?;
+            }
+            patch_list_profile(
+                &json!({"name":"Group","accentColor":"#000000"}),
+                profile,
+                None,
+                None,
+            )?;
+            validate_uri(profile.metadata_uri.as_deref())?;
+        }
         Command::Offer(OfferCommand::Update { patch, .. }) => {
             if matches!((patch.input_price,patch.cached_price),(Some(input),Some(cached)) if cached>input)
             {
@@ -158,6 +186,11 @@ fn image(path: &Path) -> Result<(&'static str, Vec<u8>)> {
         return Err(Error::Input("expected PNG, JPEG or WebP image".into()));
     };
     Ok((mime, bytes))
+}
+fn icon(path: &Path) -> Result<Vec<u8>> {
+    let bytes = read_limited(path, fossa_sdk::schema::MAX_ICON_BYTES)?;
+    fossa_sdk::schema::validate_icon(&bytes).map_err(fossa_sdk::Error::Metadata)?;
+    Ok(bytes)
 }
 fn validate_uri(uri: Option<&str>) -> Result<()> {
     if let Some(uri) = uri {
@@ -467,20 +500,42 @@ async fn offer(rt: &Runtime, command: OfferCommand) -> Result<Value> {
 }
 async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     const COMPUTE_UNITS: u32 = 250_000;
-    if let ListCommand::Create { capacity } = command {
+    if let ListCommand::Create {
+        capacity,
+        metadata_file,
+        metadata_uri,
+    } = command
+    {
         let list = Keypair::new();
         let authority = rt.wallet()?;
         let address = list.pubkey();
         let size = instruction::list_size(capacity)?;
         let rent = rt.rpc.rent(size).await?;
-        return rt.transact("create provider list", vec![
+        let mut instructions = vec![
             fossa_sdk::transaction::compute_unit_limit(COMPUTE_UNITS),
-            rt.protocol.create_account(rt.payer()?, list.pubkey(), rent, size)?,
-            rt.protocol.initialize_list(list.pubkey(), authority, capacity)?,
-        ], &[list], json!({"list":address.to_string(),"authority":authority.to_string(),"capacity":capacity})).await;
+            rt.protocol
+                .create_account(rt.payer()?, list.pubkey(), rent, size)?,
+            rt.protocol
+                .initialize_list(list.pubkey(), authority, capacity)?,
+        ];
+        let metadata = if let Some(path) = metadata_file {
+            let doc = document(MetadataKind::List, &path)?;
+            let reference = publish(rt, &doc, metadata_uri.as_deref()).await?;
+            instructions.push(rt.protocol.initialize_list_metadata(
+                address,
+                authority,
+                rt.payer()?,
+                &reference,
+            )?);
+            Some(json!({"reference":reference_view(&reference),"document":doc.value()}))
+        } else {
+            None
+        };
+        return rt.transact("create provider list", instructions, &[list], json!({"list":address.to_string(),"authority":authority.to_string(),"capacity":capacity,"metadata":metadata})).await;
     }
     let address = match command {
-        ListCommand::Show { list }
+        ListCommand::Show { list, .. }
+        | ListCommand::Update { list, .. }
         | ListCommand::Add { list, .. }
         | ListCommand::Remove { list, .. }
         | ListCommand::Close { list } => list,
@@ -493,14 +548,30 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     if state.market != rt.protocol.market {
         return Err(Error::Input("provider list market mismatch".into()));
     }
-    if matches!(command, ListCommand::Show { .. }) {
-        return Ok(json!({"address":address.to_string(),"state":state}));
+    if let ListCommand::Show { fetch_metadata, .. } = &command {
+        let metadata = list_metadata(rt, address, &state).await?;
+        let document = if *fetch_metadata && let Some(metadata) = &metadata {
+            Some(
+                Document::fetch(Kind::List, &metadata.document)
+                    .await?
+                    .value()
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        return Ok(
+            json!({"address":address.to_string(),"state":state,"metadata":metadata,"document":document}),
+        );
     }
     let authority = rt.wallet()?;
     if state.authority != authority {
         return Err(Error::Input(
             "provider list belongs to another owner".into(),
         ));
+    }
+    if let ListCommand::Update { profile, .. } = &command {
+        return update_list_profile(rt, address, &state, profile).await;
     }
     let (label, ix) = match command {
         ListCommand::Add { provider, .. } => {
@@ -549,6 +620,114 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     .await
 }
 
+async fn list_metadata(
+    rt: &Runtime,
+    list: Pubkey,
+    state: &ProviderList,
+) -> Result<Option<ListMetadata>> {
+    let address = address::list_metadata(&rt.protocol.program, &list).0;
+    let Some(raw) = rt.rpc.raw_account(address).await? else {
+        return Ok(None);
+    };
+    if raw.owner == address::SYSTEM_PROGRAM && raw.data.is_empty() {
+        return Ok(None);
+    }
+    let metadata = ListMetadata::decode(&address, &raw, &rt.protocol.program)?;
+    if metadata.market != state.market
+        || metadata.list != list
+        || metadata.authority != state.authority
+    {
+        return Err(Error::Input("list metadata binding mismatch".into()));
+    }
+    Ok(Some(metadata))
+}
+
+fn patch_list_profile(
+    current: &Value,
+    patch: &ListProfileArgs,
+    image: Option<&str>,
+    icon: Option<&str>,
+) -> Result<Document> {
+    let mut value = current.clone();
+    for (field, next) in [
+        ("name", patch.name.as_deref()),
+        ("accentColor", patch.accent_color.as_deref()),
+        ("website", patch.website.as_deref()),
+        ("image", image.or(patch.image_url.as_deref())),
+        ("icon", icon.or(patch.icon_url.as_deref())),
+    ] {
+        if let Some(next) = next {
+            value[field] = next.into();
+        }
+    }
+    for (field, clear) in [
+        ("image", patch.remove_image),
+        ("website", patch.remove_website),
+        ("icon", patch.remove_icon),
+    ] {
+        if clear {
+            value[field] = Value::Null;
+        }
+    }
+    Ok(Document::parse(Kind::List, serde_json::to_vec(&value)?)?)
+}
+
+async fn update_list_profile(
+    rt: &Runtime,
+    list: Pubkey,
+    state: &ProviderList,
+    args: &ListProfileArgs,
+) -> Result<Value> {
+    let previous = list_metadata(rt, list, state).await?;
+    let doc = if let Some(path) = &args.metadata_file {
+        document(MetadataKind::List, path)?
+    } else {
+        let current = if let Some(metadata) = &previous {
+            Document::fetch(Kind::List, &metadata.document)
+                .await?
+                .value()
+                .clone()
+        } else {
+            json!({"schemaVersion":1})
+        };
+        let image_data = args.image_file.as_deref().map(image).transpose()?;
+        let icon_data = args.icon_file.as_deref().map(icon).transpose()?;
+        let asset_uri = |bytes: &[u8]| {
+            format!(
+                "{}/v1/providers/images/{}",
+                rt.config.api_url.trim_end_matches('/'),
+                fossa_sdk::metadata::sha256_hex(bytes)
+            )
+        };
+        let image_uri = image_data.as_ref().map(|(_, bytes)| asset_uri(bytes));
+        let icon_uri = icon_data.as_deref().map(asset_uri);
+        let doc = patch_list_profile(&current, args, image_uri.as_deref(), icon_uri.as_deref())?;
+        if rt.options.execute {
+            rt.ensure_no_pending()?;
+            if let Some((mime, bytes)) = &image_data {
+                runtime::hosted(&rt.config)?
+                    .upload_image(mime, bytes)
+                    .await?;
+            }
+            if let Some(bytes) = &icon_data {
+                runtime::hosted(&rt.config)?
+                    .upload_image("image/svg+xml", bytes)
+                    .await?;
+            }
+        }
+        doc
+    };
+    let reference = publish(rt, &doc, args.metadata_uri.as_deref()).await?;
+    let instruction = if previous.is_some() {
+        rt.protocol
+            .update_list_metadata(list, state.authority, &reference)?
+    } else {
+        rt.protocol
+            .initialize_list_metadata(list, state.authority, rt.payer()?, &reference)?
+    };
+    rt.transact("update list metadata", vec![instruction], &[], json!({"list":list.to_string(),"previous":previous.map(|m|reference_view(&m.document)),"metadata":reference_view(&reference),"document":doc.value(),"image_upload":args.image_file.is_some(),"icon_upload":args.icon_file.is_some()})).await
+}
+
 async fn validate_token(rt: &Runtime, account: Pubkey, owner: Pubkey) -> Result<()> {
     let raw = rt
         .rpc
@@ -578,6 +757,7 @@ async fn account(rt: &Runtime, address: Pubkey, kind: AccountKind) -> Result<Val
         AccountKind::Capacity => typed!(CapacityBook),
         AccountKind::Booking => typed!(Booking),
         AccountKind::ProviderList => typed!(ProviderList),
+        AccountKind::ListMetadata => typed!(ListMetadata),
         AccountKind::Token => serde_json::to_value(TokenAccount::decode(
             &rt.rpc
                 .raw_account(address)
@@ -985,6 +1165,37 @@ fn validate_onboard(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_profile_patch_preserves_fields_and_explicitly_clears_assets() {
+        let current = json!({"schemaVersion":1,"name":"Group","accentColor":"#123456","image":"https://example.com/a.png","website":"https://example.com","icon":"https://example.com/a.svg"});
+        let patch = ListProfileArgs {
+            name: Some("Next".into()),
+            remove_image: true,
+            remove_website: true,
+            remove_icon: true,
+            ..Default::default()
+        };
+        let next = patch_list_profile(&current, &patch, None, None).unwrap();
+        assert_eq!(
+            next.value(),
+            &json!({"schemaVersion":1,"name":"Next","accentColor":"#123456","image":null,"website":null,"icon":null})
+        );
+        let invalid = ListProfileArgs {
+            accent_color: Some("#fff\n".into()),
+            ..Default::default()
+        };
+        assert!(patch_list_profile(&current, &invalid, None, None).is_err());
+        assert!(
+            patch_list_profile(
+                &json!({"schemaVersion":1}),
+                &ListProfileArgs::default(),
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn price_patch_preserves_capacity_privacy_activation_speed_and_other_rates() {
         let old = OfferTerms {

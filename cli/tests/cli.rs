@@ -4,6 +4,7 @@ use fossa_sdk::{
 };
 use serde_json::{Value, json};
 use std::{
+    fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
@@ -1105,7 +1106,7 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
             match req["method"].as_str().unwrap() {
                 "getMinimumBalanceForRentExemption" => json!(1000),
                 "getAccountInfo" => {
-                    json!({"context":{"slot":9},"value":if req["params"][0]==key(2).to_string() {market_account(key(99))} else {json!({"owner":key(1).to_string(),"lamports":1000,"executable":false,"data":[STANDARD.encode(&*state.lock().unwrap()),"base64"]})}})
+                    json!({"context":{"slot":9},"value":if req["params"][0]==key(2).to_string() {market_account(key(99))} else if req["params"][0]==list.to_string() {json!({"owner":key(1).to_string(),"lamports":1000,"executable":false,"data":[STANDARD.encode(&*state.lock().unwrap()),"base64"]})} else {Value::Null}})
                 }
                 method => panic!("unexpected mutation or signing request {method}"),
             },
@@ -1216,6 +1217,152 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     }
     let close = result(invoke(owner, &["list", "close", "--list", &address]));
     assert_eq!(close["instructions"][0]["opcode"], 30);
+    assert_eq!(
+        close["instructions"][0]["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(!dir.path().join("transactions").exists());
+}
+
+#[test]
+fn group_profile_commands_create_inspect_update_and_bind_authority_without_signing() {
+    use fossa_sdk::{accounts::LIST_METADATA_LEN, address};
+    let dir = tempfile::tempdir().unwrap();
+    let list = key(30);
+    let owner = key(5);
+    let (metadata_address, bump) = address::list_metadata(&key(1), &list);
+    let mut data = vec![0; fossa_sdk::instruction::list_size(2).unwrap()];
+    data[..8].copy_from_slice(b"LIST0V30");
+    data[8..40].copy_from_slice(key(2).as_ref());
+    data[40..72].copy_from_slice(owner.as_ref());
+    data[72..76].copy_from_slice(&2u32.to_le_bytes());
+    let raw = |owner: Pubkey, data: &[u8]| json!({"owner":owner.to_string(),"lamports":1000,"executable":false,"data":[STANDARD.encode(data),"base64"]});
+    let list_account = raw(key(1), &data);
+    let metadata = Arc::new(Mutex::new(Value::Null));
+    let state = metadata.clone();
+    let mock = mock(move |_, req| {
+        rpc(
+            req,
+            match req["method"].as_str().unwrap() {
+                "getMinimumBalanceForRentExemption" => json!(1000),
+                "getAccountInfo" => {
+                    json!({"context":{"slot":9},"value":if req["params"][0]==key(2).to_string(){market_account(key(99))}else if req["params"][0]==list.to_string(){list_account.clone()}else if req["params"][0]==metadata_address.to_string(){state.lock().unwrap().clone()}else{panic!("unexpected account")}})
+                }
+                method => panic!("unexpected signing or mutation {method}"),
+            },
+        )
+    });
+    let invoke = |wallet, args: &[&str]| {
+        let mut command = cmd(dir.path());
+        protocol_args(&mut command, &mock.url, wallet);
+        command.args(args).output().unwrap()
+    };
+    let file = dir.path().join("group.json");
+    let bytes = br##"{ "name":"Example Group", "accentColor":"#8B7ACF", "icon":"https://example.com/icon.svg" }"##;
+    fs::write(&file, bytes).unwrap();
+    let file = file.to_str().unwrap();
+    let address = list.to_string();
+    let create = result(invoke(
+        owner,
+        &["list", "create", "--capacity", "2", "--metadata-file", file],
+    ));
+    assert_eq!(create["instructions"][3]["opcode"], 33);
+    assert_eq!(
+        create["details"]["metadata"]["document"]["name"],
+        "Example Group"
+    );
+    let update = [
+        "list",
+        "update",
+        "--list",
+        &address,
+        "--metadata-file",
+        file,
+    ];
+    let first = result(invoke(owner, &update));
+    assert_eq!(first["instructions"][0]["opcode"], 33);
+    assert_eq!(
+        first["details"]["metadata"]["sha256"],
+        fossa_sdk::metadata::sha256_hex(bytes)
+    );
+    *metadata.lock().unwrap() = raw(address::SYSTEM_PROGRAM, &[]);
+    assert_eq!(
+        result(invoke(owner, &update))["instructions"][0]["opcode"],
+        33
+    );
+    let mut account = vec![0; LIST_METADATA_LEN];
+    account[..8].copy_from_slice(b"LMETAV30");
+    account[8..40].copy_from_slice(key(2).as_ref());
+    account[40..72].copy_from_slice(list.as_ref());
+    account[72..104].copy_from_slice(owner.as_ref());
+    account[104..136].fill(42);
+    let uri = b"https://example.com/group.json";
+    account[136..138].copy_from_slice(&(uri.len() as u16).to_le_bytes());
+    account[138] = bump;
+    account[140..140 + uri.len()].copy_from_slice(uri);
+    *metadata.lock().unwrap() = raw(key(1), &account);
+    let show = result(invoke(key(9), &["list", "show", "--list", &address]));
+    assert_eq!(show["metadata"]["list"], address);
+    assert_eq!(
+        show["metadata"]["document"]["uri"],
+        std::str::from_utf8(uri).unwrap()
+    );
+    assert_eq!(
+        result(invoke(owner, &update))["instructions"][0]["opcode"],
+        34
+    );
+    assert!(!invoke(key(9), &update).status.success());
+    account[72..104].copy_from_slice(key(9).as_ref());
+    *metadata.lock().unwrap() = raw(key(1), &account);
+    assert!(!invoke(owner, &update).status.success());
+    *metadata.lock().unwrap() = Value::Null;
+    let icon = dir.path().join("icon.svg");
+    fs::write(
+        &icon,
+        br#"<svg xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M0 0h24v24z"/></svg>"#,
+    )
+    .unwrap();
+    let patch = result(invoke(
+        owner,
+        &[
+            "list",
+            "update",
+            "--list",
+            &address,
+            "--name",
+            "Group",
+            "--accent-color",
+            "#abcdef",
+            "--icon-file",
+            icon.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(patch["details"]["icon_upload"], true);
+    assert!(
+        patch["details"]["document"]["icon"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://api.fossa.ag/v1/providers/images/")
+    );
+    fs::write(&icon, b"<svg><script/></svg>").unwrap();
+    assert!(
+        !invoke(
+            owner,
+            &[
+                "list",
+                "update",
+                "--list",
+                &address,
+                "--icon-file",
+                icon.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
     assert!(!dir.path().join("transactions").exists());
 }
 

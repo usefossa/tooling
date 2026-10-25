@@ -236,8 +236,8 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
             30,
             p.close_list(key(30), u.owner),
             1,
-            2,
-            vec![0, 1],
+            3,
+            vec![0, 1, 2],
             vec![1],
         ),
         (
@@ -247,6 +247,23 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
             6,
             vec![1, 2, 3, 4],
             vec![4],
+        ),
+        (
+            33,
+            p.initialize_list_metadata(key(30), u.owner, key(22), &d)
+                .unwrap(),
+            33 + d.uri.len(),
+            6,
+            vec![2, 4],
+            vec![3, 4],
+        ),
+        (
+            34,
+            p.update_list_metadata(key(30), u.owner, &d).unwrap(),
+            33 + d.uri.len(),
+            4,
+            vec![2],
+            vec![3],
         ),
     ];
     for (op, ix, len, count, writable, signers) in instructions {
@@ -272,6 +289,16 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
         if op == 29 {
             assert_eq!(&ix.data[1..33], o.provider.as_ref());
             assert_eq!(ix.data[33], 1);
+        }
+        if matches!(op, 30 | 33 | 34) {
+            assert_eq!(
+                ix.accounts[2].pubkey,
+                address::list_metadata(&p.program, &key(30)).0
+            );
+        }
+        if matches!(op, 33 | 34) {
+            assert_eq!(&ix.data[1..33], &d.sha256);
+            assert_eq!(&ix.data[33..], d.uri.as_bytes());
         }
         if op == 32 {
             assert_eq!(&ix.data[1..], &85u32.to_le_bytes());
@@ -643,6 +670,53 @@ fn provider_lists_validate_size_order_duplicates_and_account_owner() {
     assert!(list_size(4097).is_err());
     assert_eq!(list_size(256).unwrap(), 16464);
     assert_eq!(list_size(4096).unwrap(), 262224);
+}
+
+#[test]
+fn list_metadata_decodes_exact_reference_and_rejects_wrong_pda_owner_padding_and_version() {
+    let (p, _, _, _, _) = context();
+    let list = key(30);
+    let (at, bump) = address::list_metadata(&p.program, &list);
+    let reference = doc();
+    let mut account = raw(p.program, ListMetadata::MAGIC, LIST_METADATA_LEN);
+    for (offset, bytes) in [
+        (8, p.market.as_ref()),
+        (40, list.as_ref()),
+        (72, key(8).as_ref()),
+        (104, reference.sha256.as_slice()),
+        (140, reference.uri.as_bytes()),
+    ] {
+        put(&mut account.data, offset, bytes);
+    }
+    put(
+        &mut account.data,
+        136,
+        &(reference.uri.len() as u16).to_le_bytes(),
+    );
+    account.data[138] = bump;
+    let state = ListMetadata::decode(&at, &account, &p.program).unwrap();
+    assert_eq!(
+        (state.market, state.list, state.authority, state.document),
+        (p.market, list, key(8), reference)
+    );
+    for offset in [0, 40, 138, 139, 395] {
+        let mut bad = account.clone();
+        bad.data[offset] ^= 1;
+        assert!(ListMetadata::decode(&at, &bad, &p.program).is_err());
+    }
+    assert!(ListMetadata::decode(&key(99), &account, &p.program).is_err());
+    account.owner = key(99);
+    assert!(ListMetadata::decode(&at, &account, &p.program).is_err());
+    let bytes = br##"{ "name":"Example Group", "accentColor":"#A1b2C3", "icon":"https://example.com/icon.svg" }"##;
+    let document = Document::parse(Kind::List, bytes.to_vec()).unwrap();
+    assert_eq!(document.bytes(), bytes);
+    assert!(
+        Document::parse(
+            Kind::List,
+            br##"{"name":"Group","accentColor":"#fff","privilege":true}"##.to_vec()
+        )
+        .is_err()
+    );
 }
 
 #[test]

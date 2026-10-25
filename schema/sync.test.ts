@@ -11,6 +11,7 @@ test("indexer schema sync preserves canonical validator with local include paths
     expect(run("--check").exitCode).toBe(0);
     const validator = join(root, "indexer/src/metadata/schema.rs");
     expect(readFileSync(validator, "utf8")).toBe(readFileSync(join(import.meta.dir, "src/lib.rs"), "utf8").replaceAll('include_str!("../', 'include_str!("'));
+    expect(readFileSync(join(root, "indexer/src/metadata/icon.rs"), "utf8")).toBe(readFileSync(join(import.meta.dir, "src/icon.rs"), "utf8"));
     writeFileSync(validator, "changed");
     expect(run("--check").exitCode).not.toBe(0);
   } finally { rmSync(root, { recursive: true, force: true }); }

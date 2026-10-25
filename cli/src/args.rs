@@ -123,7 +123,7 @@ pub enum ProviderCommand {
     /// Inspect provider PDA and committed metadata reference
     #[command(after_help = DOCS)]
     Show,
-    /// Register provider profile without admission approval
+    /// Register a provider profile
     #[command(after_help = DOCS)]
     Register(DocumentArgs),
     /// Edit a verified existing profile, preserving unspecified fields and extensions
@@ -237,12 +237,29 @@ pub enum ListCommand {
     Show {
         #[arg(long)]
         list: Pubkey,
+        /// Fetch and verify the profile JSON against its on-chain hash
+        #[arg(long)]
+        fetch_metadata: bool,
     },
     /// Create an empty provider list owned by the configured wallet
     #[command(after_help = DOCS)]
     Create {
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
         capacity: u32,
+        /// Optional profile JSON; exact bytes determine SHA-256
+        #[arg(long)]
+        metadata_file: Option<PathBuf>,
+        /// Custom immutable HTTPS location; omit for Fossa hosting on --execute
+        #[arg(long, requires = "metadata_file")]
+        metadata_uri: Option<String>,
+    },
+    /// Create or update your provider group's profile
+    #[command(after_help = DOCS)]
+    Update {
+        #[arg(long)]
+        list: Pubkey,
+        #[command(flatten)]
+        profile: ListProfileArgs,
     },
     /// Add a provider public key to your list
     #[command(after_help = DOCS)]
@@ -267,16 +284,50 @@ pub enum ListCommand {
         list: Pubkey,
     },
 }
+#[derive(Args, Debug, Default)]
+#[group(required = true, multiple = true)]
+pub struct ListProfileArgs {
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, conflicts_with_all = ["image_file", "remove_image"])]
+    pub image_url: Option<String>,
+    /// Upload local PNG/JPEG/WebP profile picture
+    #[arg(long, conflicts_with = "remove_image")]
+    pub image_file: Option<PathBuf>,
+    #[arg(long)]
+    pub remove_image: bool,
+    #[arg(long, conflicts_with = "remove_website")]
+    pub website: Option<String>,
+    #[arg(long)]
+    pub remove_website: bool,
+    /// Six-digit hexadecimal color, for example #8B7ACF
+    #[arg(long)]
+    pub accent_color: Option<String>,
+    #[arg(long, conflicts_with_all = ["icon_file", "remove_icon"])]
+    pub icon_url: Option<String>,
+    /// Upload a simple white SVG icon, at most 64 KiB
+    #[arg(long, conflicts_with = "remove_icon")]
+    pub icon_file: Option<PathBuf>,
+    #[arg(long)]
+    pub remove_icon: bool,
+    /// Replace profile with exact validated JSON bytes
+    #[arg(long, conflicts_with_all = ["name", "image_url", "image_file", "remove_image", "website", "remove_website", "accent_color", "icon_url", "icon_file", "remove_icon"])]
+    pub metadata_file: Option<PathBuf>,
+    #[arg(long, requires = "metadata_file")]
+    pub metadata_uri: Option<String>,
+}
 #[derive(Clone, Copy, ValueEnum, Debug)]
 pub enum MetadataKind {
     Provider,
     Model,
+    List,
 }
 impl From<MetadataKind> for fossa_sdk::metadata::Kind {
     fn from(value: MetadataKind) -> Self {
         match value {
             MetadataKind::Provider => Self::Provider,
             MetadataKind::Model => Self::Model,
+            MetadataKind::List => Self::List,
         }
     }
 }
@@ -306,6 +357,7 @@ pub enum AccountKind {
     Capacity,
     Booking,
     ProviderList,
+    ListMetadata,
     Token,
 }
 #[derive(Subcommand, Debug)]

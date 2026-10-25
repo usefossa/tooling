@@ -19,6 +19,9 @@ pub fn provider(program: &Pubkey, market: &Pubkey, authority: &Pubkey) -> (Pubke
 pub fn model_metadata(program: &Pubkey, model: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"model_metadata", model.as_ref()], program)
 }
+pub fn list_metadata(program: &Pubkey, list: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"list_metadata", list.as_ref()], program)
+}
 pub fn vault(program: &Pubkey, user: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault", user.as_ref()], program)
 }

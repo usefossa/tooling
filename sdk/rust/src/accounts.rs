@@ -9,6 +9,7 @@ pub const MARKET_LEN: usize = 72;
 pub const MODEL_LEN: usize = 144;
 pub const PROVIDER_LEN: usize = 364;
 pub const MODEL_METADATA_LEN: usize = 396;
+pub const LIST_METADATA_LEN: usize = 396;
 pub const USER_LEN: usize = 120;
 pub const BOOKING_LEN: usize = 368;
 pub const HEADER_LEN: usize = 48;
@@ -475,6 +476,36 @@ impl ProviderList {
         self.providers
             .binary_search_by(|key| key.as_ref().cmp(provider.as_ref()))
             .is_ok()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ListMetadata {
+    #[serde(with = "crate::serde_pubkey")]
+    pub market: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub list: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub authority: Pubkey,
+    pub document: DocumentRef,
+    pub bump: u8,
+}
+impl Decode for ListMetadata {
+    const MAGIC: &'static [u8; 8] = b"LMETAV30";
+    fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
+        let d = state(a, p, Self::MAGIC, LIST_METADATA_LEN)?;
+        let value = Self {
+            market: key(d, 8),
+            list: key(d, 40),
+            authority: key(d, 72),
+            document: DocumentRef::decode(d, 104, 140)?,
+            bump: d[138],
+        };
+        ensure(
+            d[139] == 0 && address::list_metadata(p, &value.list) == (*at, value.bump),
+            "list metadata PDA or reserved byte",
+        )?;
+        Ok(value)
     }
 }
 impl Decode for ProviderList {

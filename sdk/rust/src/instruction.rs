@@ -506,7 +506,52 @@ impl Protocol {
         self.ix(29, payload, vec![r(self.market), w(list), s(authority)])
     }
     pub fn close_list(&self, list: Pubkey, authority: Pubkey) -> Instruction {
-        self.ix(30, [], vec![w(list), ws(authority)])
+        self.ix(
+            30,
+            [],
+            vec![
+                w(list),
+                ws(authority),
+                w(address::list_metadata(&self.program, &list).0),
+            ],
+        )
+    }
+    pub fn initialize_list_metadata(
+        &self,
+        list: Pubkey,
+        authority: Pubkey,
+        payer: Pubkey,
+        document: &DocumentRef,
+    ) -> Result<Instruction> {
+        Ok(self.ix(
+            33,
+            document.encode()?,
+            vec![
+                r(self.market),
+                r(list),
+                w(address::list_metadata(&self.program, &list).0),
+                s(authority),
+                ws(payer),
+                r(SYSTEM_PROGRAM),
+            ],
+        ))
+    }
+    pub fn update_list_metadata(
+        &self,
+        list: Pubkey,
+        authority: Pubkey,
+        document: &DocumentRef,
+    ) -> Result<Instruction> {
+        Ok(self.ix(
+            34,
+            document.encode()?,
+            vec![
+                r(self.market),
+                r(list),
+                w(address::list_metadata(&self.program, &list).0),
+                s(authority),
+            ],
+        ))
     }
     pub fn grow_model(&self, model: ModelKeys, payer: Pubkey, limit: u32) -> Result<Instruction> {
         ensure(

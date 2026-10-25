@@ -394,6 +394,80 @@ async fn hosted_upload_and_rpc_sign_exact_bytes_and_fresh_nonces() {
 }
 
 #[tokio::test]
+async fn group_metadata_and_svg_uploads_sign_exact_bytes_and_reject_unsafe_icons_locally() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let mock = spawn_mock(move |path, headers, body| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        let api = format!("http://{}", headers["host"]);
+        let wallet: Pubkey = headers["x-fossa-wallet"].parse().unwrap();
+        let message = signing_message(
+            &api,
+            path,
+            &wallet,
+            headers["x-fossa-expires"].parse().unwrap(),
+            &headers["x-fossa-nonce"],
+            body,
+        )
+        .unwrap();
+        assert!(
+            headers["x-fossa-signature"]
+                .parse::<Signature>()
+                .unwrap()
+                .verify(wallet.as_ref(), message.as_bytes())
+        );
+        let prefix = if path == METADATA_LIST_PATH {
+            assert_eq!(headers["content-type"], "application/json");
+            Document::parse(Kind::List, body.to_vec()).unwrap();
+            "/v1/market/metadata/"
+        } else {
+            assert_eq!(path, IMAGE_PATH);
+            assert_eq!(headers["content-type"], "image/svg+xml");
+            fossa_metadata::validate_icon(body).unwrap();
+            "/v1/providers/images/"
+        };
+        let hash = metadata::sha256_hex(body);
+        (
+            200,
+            json!({"sha256":hash,"uri":format!("{api}{prefix}{hash}"),"bytes":body.len()}),
+        )
+    })
+    .await;
+    let client = HostedClient::new(&mock.url, Arc::new(signer())).unwrap();
+    let doc = Document::parse(
+        Kind::List,
+        br##"{ "name":"Group", "accentColor":"#123456" }"##.to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        client.upload_metadata(&doc).await.unwrap().sha256,
+        metadata::sha256_hex(doc.bytes())
+    );
+    let icon = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="white" d="M1 1h20v20H1z"/></svg>"#;
+    assert_eq!(
+        client
+            .upload_image("image/svg+xml", icon)
+            .await
+            .unwrap()
+            .bytes,
+        icon.len()
+    );
+    assert!(
+        client
+            .upload_image("image/svg+xml", b"<svg><script/></svg>")
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .upload_image("image/svg+xml", &vec![b' '; 65_537])
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn onboarding_registers_without_admission_approval() {
     let p = protocol();
     let admin = key(20);

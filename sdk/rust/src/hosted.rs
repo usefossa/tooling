@@ -14,6 +14,7 @@ use std::{
 pub type WalletSigner = Arc<dyn Signer + Send + Sync>;
 pub const METADATA_PROVIDER_PATH: &str = "/v1/providers/metadata/provider";
 pub const METADATA_MODEL_PATH: &str = "/v1/providers/metadata/model";
+pub const METADATA_LIST_PATH: &str = "/v1/providers/metadata/list";
 pub const IMAGE_PATH: &str = "/v1/providers/images";
 pub const RPC_PATH: &str = "/v1/providers/rpc";
 
@@ -73,7 +74,11 @@ pub fn signing_message(
     ensure(
         matches!(
             path,
-            METADATA_PROVIDER_PATH | METADATA_MODEL_PATH | IMAGE_PATH | RPC_PATH
+            METADATA_PROVIDER_PATH
+                | METADATA_MODEL_PATH
+                | METADATA_LIST_PATH
+                | IMAGE_PATH
+                | RPC_PATH
         ),
         "provider request path",
     )?;
@@ -161,6 +166,7 @@ impl HostedClient {
         let path = match document.kind() {
             metadata::Kind::Provider => METADATA_PROVIDER_PATH,
             metadata::Kind::Model => METADATA_MODEL_PATH,
+            metadata::Kind::List => METADATA_LIST_PATH,
         };
         self.upload(path, "application/json", document.bytes())
             .await
@@ -174,9 +180,10 @@ impl HostedClient {
             "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
             "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
             "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+            "image/svg+xml" => fossa_metadata::validate_icon(bytes).is_ok(),
             _ => false,
         };
-        ensure(valid, "PNG, JPEG or WebP image")?;
+        ensure(valid, "PNG, JPEG, WebP or simple white SVG image")?;
         self.upload(IMAGE_PATH, content_type, bytes).await
     }
     async fn upload(&self, path: &str, content_type: &str, body: &[u8]) -> Result<Upload> {
