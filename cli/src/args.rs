@@ -253,7 +253,7 @@ pub enum ListCommand {
         #[arg(long, requires = "metadata_file")]
         metadata_uri: Option<String>,
     },
-    /// Create or update your provider group's profile
+    /// Create or update your provider list metadata
     #[command(after_help = DOCS)]
     Update {
         #[arg(long)]
