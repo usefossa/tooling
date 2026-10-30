@@ -4,7 +4,7 @@ use crate::{
     ensure,
     hosted::{HostedClient, RPC_PATH, http_client, response_bytes},
     instruction::Protocol,
-    transaction::{PendingTransaction, PreparedTransaction},
+    transaction::{PendingTransaction, PreparedTransaction, compute_unit_limit},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -122,6 +122,7 @@ impl WireAccount {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Simulation {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub err: Option<Value>,
     #[serde(default)]
     pub logs: Option<Vec<String>>,
@@ -447,13 +448,7 @@ impl RpcClient {
         payer: Pubkey,
     ) -> Result<PreparedTransaction> {
         let latest = self.latest_blockhash().await?;
-        PreparedTransaction::new(
-            instructions,
-            payer,
-            latest.blockhash,
-            latest.last_valid_block_height,
-            latest.min_context_slot,
-        )
+        self.prepare_measured(instructions, payer, latest).await
     }
     pub async fn latest_blockhash(&self) -> Result<LatestBlockhash> {
         self.latest_blockhash_at(0).await
@@ -500,13 +495,55 @@ impl RpcClient {
         }
         let latest = cached.as_ref().unwrap().1.clone();
         drop(cached);
-        PreparedTransaction::new(
-            instructions,
-            payer,
-            latest.blockhash,
-            latest.last_valid_block_height,
-            latest.min_context_slot,
-        )
+        self.prepare_measured(instructions, payer, latest).await
+    }
+    async fn prepare_measured(
+        &self,
+        instructions: &[Instruction],
+        payer: Pubkey,
+        latest: LatestBlockhash,
+    ) -> Result<PreparedTransaction> {
+        ensure(!instructions.is_empty(), "transaction instructions")?;
+        let budget = compute_unit_limit(1_400_000);
+        let mut measured: Vec<_> = std::iter::once(budget.clone())
+            .chain(
+                instructions
+                    .iter()
+                    .filter(|ix| ix.program_id != budget.program_id || ix.data.first() != Some(&2))
+                    .cloned(),
+            )
+            .collect();
+        let build = |instructions: &[Instruction]| {
+            PreparedTransaction::new(
+                instructions,
+                payer,
+                latest.blockhash.clone(),
+                latest.last_valid_block_height,
+                latest.min_context_slot,
+            )
+        };
+        let probe = build(&measured)?;
+        let bytes = bincode::serialize(&probe.transaction)
+            .map_err(|_| Error::Invalid("transaction serialization"))?;
+        let response: ContextValue<Simulation> = self.call("simulateTransaction", json!([
+            STANDARD.encode(bytes), {"encoding":"base64","commitment":self.commitment,"sigVerify":false,"minContextSlot":latest.min_context_slot}
+        ])).await?;
+        ensure(
+            response.context.slot >= latest.min_context_slot,
+            "RPC simulation context slot",
+        )?;
+        response.value.check()?;
+        let consumed = response
+            .value
+            .units_consumed
+            .ok_or(Error::Invalid("simulation compute units"))?;
+        ensure(
+            consumed > 0 && consumed <= 1_400_000,
+            "simulation compute units",
+        )?;
+        measured[0] =
+            compute_unit_limit((consumed + consumed.div_ceil(10) + 1000).min(1_400_000) as u32);
+        build(&measured)
     }
     pub async fn invalidate_blockhash(&self) {
         *self.blockhash[self.commitment as usize].lock().await = None;

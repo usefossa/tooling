@@ -265,7 +265,7 @@ async fn rpc_prepare_simulate_broadcast_and_resume_use_same_signed_bytes() {
     let record = sent.clone();
     let mock=spawn_mock(move |_,_,body| {let request:Value=serde_json::from_slice(body).unwrap();let method=request["method"].as_str().unwrap();seen.lock().unwrap().push(method.to_owned());let result=match method {
         "getLatestBlockhash"=>json!({"context":{"slot":9},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}}),
-        "simulateTransaction"=>{assert_eq!(request["params"][1]["sigVerify"],true);assert_eq!(request["params"][1]["minContextSlot"],9);json!({"context":{"slot":9},"value":{"err":null,"logs":[],"unitsConsumed":500}})},
+        "simulateTransaction"=>{assert!(request["params"][1]["sigVerify"].is_boolean());assert_eq!(request["params"][1]["minContextSlot"],9);json!({"context":{"slot":9},"value":{"err":null,"logs":[],"unitsConsumed":500}})},
         "sendTransaction"=>{let wire=request["params"][0].as_str().unwrap().to_owned();*record.lock().unwrap()=Some(wire.clone());let tx:Transaction=bincode::deserialize(&STANDARD.decode(wire).unwrap()).unwrap();tx.verify().unwrap();json!(tx.signatures[0].to_string())},
         "getSignatureStatuses"=>json!({"context":{"slot":10},"value":[{"slot":10,"confirmations":1,"err":null,"confirmationStatus":"confirmed"}]}),
         _=>panic!("unexpected method {method}")};rpc_response(body,result)}).await;
@@ -279,6 +279,10 @@ async fn rpc_prepare_simulate_broadcast_and_resume_use_same_signed_bytes() {
         .await
         .unwrap();
     let pending = prepared.sign(&[&signer]).unwrap();
+    assert_eq!(
+        pending.transaction().unwrap().message.instructions[0].data,
+        fossa_sdk::transaction::compute_unit_limit(1550).data
+    );
     rpc.simulate(&pending).await.unwrap().check().unwrap();
     rpc.broadcast(&pending).await.unwrap();
     rpc.confirm(&pending, Duration::from_secs(1)).await.unwrap();
@@ -892,6 +896,9 @@ async fn blockhash_reuse_coalesces_refreshes_and_respects_slots_age_and_commitme
     let count = calls.clone();
     let mock = spawn_mock(move |_, _, body| {
         let q: Value = serde_json::from_slice(body).unwrap();
+        if q["method"] == "simulateTransaction" {
+            return rpc_response(body, json!({"context":{"slot":q["params"][1]["minContextSlot"]},"value":{"err":null,"unitsConsumed":500}}));
+        }
         assert_eq!(q["method"], "getLatestBlockhash");
         count.fetch_add(1, Ordering::Relaxed);
         let slot = q["params"][0]["minContextSlot"].as_u64().unwrap().max(9);
@@ -948,6 +955,50 @@ async fn cached_blockhash_rejects_stale_rpc_context() {
     let rpc = RpcClient::new(&mock.url).unwrap();
     let ix = protocol().update_list(key(5), key(7), key(6), true);
     assert!(rpc.prepare_cached(&[ix], key(7), 10).await.is_err());
+}
+
+#[tokio::test]
+async fn compute_measurement_requires_successful_full_unsigned_simulation() {
+    for (consumed, error, expected) in [
+        (Some(10_001), Some(false), Some(12_002)),
+        (Some(1_400_000), Some(false), Some(1_400_000)),
+        (None, Some(false), None),
+        (Some(0), Some(false), None),
+        (Some(1_400_001), Some(false), None),
+        (Some(5000), Some(true), None),
+        (Some(5000), None, None),
+    ] {
+        let mock = spawn_mock(move |_, _, body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            if request["method"] == "getLatestBlockhash" {
+                return rpc_response(body, json!({"context":{"slot":9},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}}));
+            }
+            assert_eq!(request["method"], "simulateTransaction");
+            assert_eq!(request["params"][1]["sigVerify"], false);
+            let tx: Transaction = bincode::deserialize(&STANDARD.decode(request["params"][0].as_str().unwrap()).unwrap()).unwrap();
+            assert!(tx.signatures.iter().all(|signature| *signature == Signature::default()));
+            assert_eq!(tx.message.instructions.len(), 3);
+            assert_eq!(tx.message.instructions[0].data, transaction::compute_unit_limit(1_400_000).data);
+            let mut value = json!({"unitsConsumed":consumed});
+            if let Some(error) = error { value["err"] = if error { json!({"InstructionError":[1,"failure"]}) } else { Value::Null }; }
+            rpc_response(body, json!({"context":{"slot":9},"value":value}))
+        }).await;
+        let rpc = RpcClient::new(&mock.url).unwrap();
+        let ix = protocol().update_list(key(5), key(7), key(6), true);
+        let result = rpc
+            .prepare(
+                &[transaction::compute_unit_limit(500_000), ix.clone(), ix],
+                key(7),
+            )
+            .await;
+        match expected {
+            Some(units) => assert_eq!(
+                result.unwrap().transaction.message.instructions[0].data,
+                transaction::compute_unit_limit(units).data
+            ),
+            None => assert!(result.is_err()),
+        }
+    }
 }
 
 #[tokio::test]

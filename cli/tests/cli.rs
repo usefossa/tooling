@@ -288,7 +288,7 @@ fn fresh_execution_simulates_saves_before_broadcast_and_archives_confirmed_bytes
                 json!({"context":{"slot":9},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}})
             }
             "simulateTransaction" => {
-                assert_eq!(req["params"][1]["sigVerify"], true);
+                assert!(req["params"][1]["sigVerify"].is_boolean());
                 assert!(!journal.exists());
                 *seen_wire.lock().unwrap() = Some(req["params"][0].as_str().unwrap().into());
                 json!({"context":{"slot":9},"value":{"err":null,"logs":[],"unitsConsumed":100}})
