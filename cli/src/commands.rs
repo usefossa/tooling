@@ -16,6 +16,8 @@ use fossa_sdk::{
 use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
+mod model_markets;
+
 pub async fn run(cli: Cli) -> Result<Value> {
     preflight(&cli.command)?;
     if let Command::Metadata(MetadataCommand::Validate { kind, file }) = &cli.command {
@@ -62,6 +64,8 @@ pub async fn run(cli: Cli) -> Result<Value> {
     match cli.command {
         Command::Provider(command) => provider(&rt, command).await,
         Command::Model(command) => model(&rt, command).await,
+        Command::Group(command) => model_markets::group(&rt, command).await,
+        Command::Council(command) => model_markets::council(&rt, command).await,
         Command::Offer(command) => offer(&rt, command).await,
         Command::List(command) => provider_list(&rt, command).await,
         Command::Account(AccountCommand::Show { address, kind }) => {
@@ -74,6 +78,7 @@ pub async fn run(cli: Cli) -> Result<Value> {
     }
 }
 fn preflight(command: &Command) -> Result<()> {
+    model_markets::preflight(command)?;
     match command {
         Command::Metadata(
             MetadataCommand::Validate { kind, file } | MetadataCommand::Upload { kind, file },
@@ -328,6 +333,10 @@ fn model_address(rt: &Runtime, id: &str) -> Result<Pubkey> {
 }
 async fn model(rt: &Runtime, command: ModelCommand) -> Result<Value> {
     match command {
+        ModelCommand::AssignGroup { model, group } => {
+            model_markets::assign(rt, model, Some(group)).await
+        }
+        ModelCommand::ClearGroup(model) => model_markets::assign(rt, model, None).await,
         ModelCommand::Show(args) => {
             let address = model_address(rt, &args.model)?;
             let (model, terms, capacity) = rt.rpc.model_books(&rt.protocol, address).await?;
@@ -502,6 +511,9 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     const COMPUTE_UNITS: u32 = 250_000;
     if let ListCommand::Create {
         capacity,
+        fee_bps,
+        protocol_share_bps,
+        maximum_payment,
         metadata_file,
         metadata_uri,
     } = command
@@ -509,14 +521,40 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
         let list = Keypair::new();
         let authority = rt.wallet()?;
         let address = list.pubkey();
-        let size = instruction::list_size(capacity)?;
-        let rent = rt.rpc.rent(size).await?;
+        let market = rt
+            .rpc
+            .require_account::<Market>(rt.protocol.market, rt.protocol.program)
+            .await?;
+        if !market.creation_enabled
+            || market.creation_net_price == 0
+            || market.creation_mint == Pubkey::default()
+        {
+            return Err(Error::Input("List creation is disabled until governance-token payment is configured and enabled".into()));
+        }
         let mut instructions = vec![
             fossa_sdk::transaction::compute_unit_limit(COMPUTE_UNITS),
-            rt.protocol
-                .create_account(rt.payer()?, list.pubkey(), rent, size)?,
-            rt.protocol
-                .initialize_list(list.pubkey(), authority, capacity)?,
+            rt.protocol.initialize_list(
+                list.pubkey(),
+                authority,
+                instruction::ListCreation {
+                    limit: capacity,
+                    fee_bps,
+                    protocol_share: protocol_share_bps,
+                    maximum_payment,
+                    source: address::associated_token_with_program(
+                        &market.creation_mint,
+                        &authority,
+                        &market.creation_token_program,
+                    ),
+                    destination: address::associated_token_with_program(
+                        &market.creation_mint,
+                        &market.council,
+                        &market.creation_token_program,
+                    ),
+                    mint: market.creation_mint,
+                    token_program: market.creation_token_program,
+                },
+            )?,
         ];
         let metadata = if let Some(path) = metadata_file {
             let doc = document(MetadataKind::List, &path)?;
@@ -536,6 +574,7 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     let address = match command {
         ListCommand::Show { list, .. }
         | ListCommand::Update { list, .. }
+        | ListCommand::ConfigureFees { list, .. }
         | ListCommand::Add { list, .. }
         | ListCommand::Remove { list, .. }
         | ListCommand::Close { list } => list,
@@ -572,6 +611,18 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
     }
     if let ListCommand::Update { profile, .. } = &command {
         return update_list_profile(rt, address, &state, profile).await;
+    }
+    if let ListCommand::ConfigureFees {
+        fee_bps,
+        protocol_share_bps,
+        ..
+    } = command
+    {
+        let fees = fossa_sdk::reserve::ListFees {
+            fee_bps,
+            protocol_share: protocol_share_bps,
+        };
+        return rt.transact("configure list fees", vec![rt.protocol.configure_list_fees(address, authority, fees)?], &[], json!({"list":address.to_string(),"previous":{"fee_bps":state.fee_bps,"protocol_share":state.protocol_share},"next":fees})).await;
     }
     let (label, ix) = match command {
         ListCommand::Add { provider, .. } => {
@@ -752,6 +803,7 @@ async fn account(rt: &Runtime, address: Pubkey, kind: AccountKind) -> Result<Val
         AccountKind::Provider => typed!(Provider),
         AccountKind::Model => typed!(Model),
         AccountKind::ModelMetadata => typed!(ModelMetadata),
+        AccountKind::ModelGroup => typed!(ModelGroup),
         AccountKind::User => typed!(User),
         AccountKind::Terms => typed!(TermsBook),
         AccountKind::Capacity => typed!(CapacityBook),
@@ -828,8 +880,6 @@ async fn user(rt: &Runtime, command: UserCommand) -> Result<Value> {
         let vault = address::associated_token(&rt.protocol.mint, &authority);
         let payer = rt.payer()?;
         let ix = vec![
-            rt.protocol
-                .create_account(payer, address, rt.rpc.rent(USER_LEN).await?, USER_LEN)?,
             instruction::create_associated_token(payer, authority, rt.protocol.mint),
             rt.protocol.initialize_user(UserKeys {
                 user: address,
@@ -926,6 +976,7 @@ async fn booking(rt: &Runtime, command: BookingCommand) -> Result<Value> {
         &state,
         model,
         UserKeys::from_account(state.user, &user),
+        &rt.protocol.mint,
     )?;
     let generation = (state.generation > 0).then_some(state.generation);
     let (label, ix) = match command {
@@ -1115,8 +1166,11 @@ async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
         fossa_sdk::transaction::compute_unit_limit(
             (20_000 + 500 * terms.entries.len().min(4096) as u32).min(1_400_000),
         ),
-        rt.protocol
-            .create_account(payer, booking, rt.rpc.rent(BOOKING_LEN).await?, BOOKING_LEN)?,
+        rt.protocol.initialize_reusable_booking(
+            UserKeys::from_account(args.user, &user),
+            booking,
+            payer,
+        ),
         rt.protocol.book(
             ModelKeys::from_account(address, &model),
             UserKeys::from_account(args.user, &user),

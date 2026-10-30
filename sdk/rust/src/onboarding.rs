@@ -44,7 +44,7 @@ pub async fn plan(
     protocol: &Protocol,
     config: &OnboardConfig,
 ) -> Result<OnboardingPlan> {
-    let [terms_size, capacity_size] = crate::instruction::book_sizes(config.book_limit)?;
+    crate::instruction::book_sizes(config.book_limit)?;
     config.document.encode()?;
     let mut seen = std::collections::HashSet::new();
     for model in &config.models {
@@ -77,7 +77,6 @@ pub async fn plan(
             vec![protocol.initialize_provider(config.provider, config.payer, &config.document)?],
         ));
     }
-    let mut book_rent = None;
     for desired in &config.models {
         let mut growth = None;
         let id = address::model_id(&desired.id);
@@ -167,34 +166,16 @@ pub async fn plan(
                 model: model_key,
                 terms: terms.pubkey(),
                 capacity: capacity.pubkey(),
+                group: Pubkey::default(),
             };
-            let (terms_rent, capacity_rent) = match book_rent {
-                Some(rent) => rent,
-                None => {
-                    let (terms, capacity) =
-                        tokio::join!(rpc.rent(terms_size), rpc.rent(capacity_size));
-                    let rent = (terms?, capacity?);
-                    book_rent = Some(rent);
-                    rent
-                }
-            };
-            let mut instructions = vec![
-                protocol.create_account(config.payer, keys.terms, terms_rent, terms_size)?,
-                protocol.create_account(
-                    config.payer,
-                    keys.capacity,
-                    capacity_rent,
-                    capacity_size,
-                )?,
-            ];
-            instructions.push(protocol.initialize_model(InitializeModel {
+            let instructions = vec![protocol.initialize_model(InitializeModel {
                 model: keys,
                 provider: config.provider,
                 payer: config.payer,
                 id,
                 limit: config.book_limit,
                 document: &desired.document,
-            })?);
+            })?];
             plan.steps.push(PlanStep {
                 label: format!("initialize model {}", desired.id),
                 instructions,

@@ -21,6 +21,7 @@ fn context() -> (Protocol, ModelKeys, UserKeys, OfferKeys, SettlementKeys) {
         model: address::model(&p.program, &p.market, &[4; 32]).0,
         terms: key(5),
         capacity: key(6),
+        group: Pubkey::default(),
     };
     let u = UserKeys {
         user: key(7),
@@ -42,6 +43,7 @@ fn context() -> (Protocol, ModelKeys, UserKeys, OfferKeys, SettlementKeys) {
             offer: o,
             user: u,
             booking: key(13),
+            fee_destinations: None,
         },
     )
 }
@@ -100,76 +102,97 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
     let (p, m, u, o, k) = context();
     let d = doc();
     let instructions = vec![
-        (0, p.initialize_market(key(20)), 1, 3, vec![0], vec![0, 1]),
-        (1, p.initialize_user(u), 1, 4, vec![0], vec![0, 1]),
         (
-            2,
+            "initialize_market",
+            p.initialize_market(key(20)),
+            8,
+            4,
+            vec![0, 2],
+            vec![0, 2],
+        ),
+        (
+            "initialize_user",
+            p.initialize_user(u),
+            8,
+            6,
+            vec![0, 2],
+            vec![0, 2],
+        ),
+        (
+            "register_offer",
             p.register_offer(o, terms()).unwrap(),
-            25,
+            32,
             7,
             vec![2, 3],
             vec![5],
         ),
         (
-            3,
+            "deposit",
             p.deposit(u, key(21), 1).unwrap(),
-            9,
-            7,
-            vec![1, 3, 4],
+            16,
+            8,
+            vec![1, 3, 5],
             vec![2],
         ),
         (
-            5,
+            "update_offer",
             p.update_offer(o, terms()).unwrap(),
-            25,
+            32,
             4,
             vec![2],
             vec![3],
         ),
         (
-            6,
+            "reserve_booking",
             p.book(m, u, k.booking, key(22), &request(), BookingMode::OneShot)
                 .unwrap(),
-            108,
-            9,
+            116,
+            10,
             vec![3, 4, 6],
-            vec![5, 6, 7],
+            vec![5],
         ),
         (
-            7,
+            "claim_booking",
             p.claim(k, Usage::default(), None).unwrap(),
-            13,
+            21,
             11,
             vec![2, 3, 4, 6, 7],
             vec![5],
         ),
-        (8, p.expire(k, None).unwrap(), 1, 5, vec![2, 3, 4], vec![]),
         (
-            10,
-            p.withdraw(u, key(21), 1).unwrap(),
+            "expire_booking",
+            p.expire(k, None).unwrap(),
             9,
+            5,
+            vec![2, 3, 4],
+            vec![],
+        ),
+        (
+            "withdraw",
+            p.withdraw(u, key(21), 1).unwrap(),
+            16,
             8,
             vec![1, 3, 4],
             vec![2],
         ),
         (
-            15,
+            "release_booking",
             p.release(k, None).unwrap(),
-            1,
+            9,
             6,
             vec![2, 3, 4],
             vec![5],
         ),
         (
-            17,
+            "close_booking",
             p.close(k.booking, key(22), false),
-            1,
+            8,
             2,
             vec![0, 1],
             vec![],
         ),
         (
-            18,
+            "initialize_model",
             p.initialize_model(InitializeModel {
                 model: m,
                 provider: o.provider,
@@ -179,140 +202,138 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
                 document: &d,
             })
             .unwrap(),
-            69 + d.uri.len(),
+            80 + d.uri.len(),
             9,
-            vec![1, 2, 3, 5, 8],
-            vec![2, 3, 4, 5],
+            vec![2, 4, 5, 6, 7],
+            vec![1, 2, 5, 6],
         ),
         (
-            19,
+            "initialize_provider",
             p.initialize_provider(o.provider, key(22), &d).unwrap(),
-            33 + d.uri.len(),
+            44 + d.uri.len(),
             5,
-            vec![1, 3],
             vec![2, 3],
+            vec![1, 2],
         ),
         (
-            21,
+            "update_profile",
             p.update_provider_metadata(o.provider, &d).unwrap(),
-            33 + d.uri.len(),
+            44 + d.uri.len(),
             3,
             vec![1],
             vec![2],
         ),
         (
-            22,
+            "update_model_metadata",
             p.update_model_metadata(m.model, o.provider, &d).unwrap(),
-            33 + d.uri.len(),
+            44 + d.uri.len(),
             4,
             vec![2],
             vec![3],
         ),
         (
-            26,
+            "initialize_receipt",
             p.initialize_reusable_booking(u, k.booking, key(22)),
-            1,
-            5,
-            vec![3],
+            8,
+            6,
+            vec![3, 4],
             vec![2, 3, 4],
         ),
         (
-            28,
-            p.initialize_list(key(30), u.owner, 256).unwrap(),
-            5,
-            3,
-            vec![1],
+            "initialize_list",
+            p.initialize_list(
+                key(30),
+                u.owner,
+                ListCreation {
+                    limit: 256,
+                    fee_bps: 10,
+                    protocol_share: 5000,
+                    maximum_payment: 1,
+                    source: key(31),
+                    destination: key(32),
+                    mint: key(33),
+                    token_program: address::TOKEN_PROGRAM,
+                },
+            )
+            .unwrap(),
+            24,
+            8,
+            vec![1, 2, 4, 5],
             vec![1, 2],
         ),
         (
-            29,
+            "update_list",
             p.update_list(key(30), u.owner, o.provider, true),
-            34,
+            41,
             3,
             vec![1],
             vec![2],
         ),
         (
-            30,
+            "close_list",
             p.close_list(key(30), u.owner),
-            1,
+            8,
             3,
             vec![0, 1, 2],
             vec![1],
         ),
         (
-            32,
+            "grow_books",
             p.grow_model(m, key(22), 85).unwrap(),
+            12,
             5,
-            6,
             vec![1, 2, 3, 4],
             vec![4],
         ),
         (
-            33,
+            "initialize_list_metadata",
             p.initialize_list_metadata(key(30), u.owner, key(22), &d)
                 .unwrap(),
-            33 + d.uri.len(),
+            44 + d.uri.len(),
             6,
-            vec![2, 4],
             vec![3, 4],
+            vec![2, 3],
         ),
         (
-            34,
+            "update_list_metadata",
             p.update_list_metadata(key(30), u.owner, &d).unwrap(),
-            33 + d.uri.len(),
+            44 + d.uri.len(),
             4,
             vec![2],
             vec![3],
         ),
     ];
-    for (op, ix, len, count, writable, signers) in instructions {
+    for (name, ix, len, count, writable, signers) in instructions {
+        use sha2::{Digest, Sha256};
+        let expected = Sha256::digest(format!("global:{name}").as_bytes());
         assert_eq!(ix.program_id, p.program);
-        assert_eq!(ix.data[0], op);
-        assert_eq!(ix.data.len(), len, "opcode {op}");
-        assert_eq!(ix.accounts.len(), count, "opcode {op}");
-        for (index, a) in ix.accounts.iter().enumerate() {
+        assert_eq!(&ix.data[..8], &expected[..8]);
+        assert_eq!(ix.data.len(), len, "{name}");
+        assert_eq!(ix.accounts.len(), count, "{name}");
+        for (index, account) in ix.accounts.iter().enumerate() {
             assert_eq!(
-                a.is_writable,
+                account.is_writable,
                 writable.contains(&index),
-                "opcode {op} writable {index}"
+                "{name} writable {index}"
             );
             assert_eq!(
-                a.is_signer,
+                account.is_signer,
                 signers.contains(&index),
-                "opcode {op} signer {index}"
+                "{name} signer {index}"
             );
         }
-        if op == 6 {
+        if name == "reserve_booking" {
             assert_eq!(ix.accounts[8].pubkey, request().provider_list);
+            assert_eq!(ix.accounts[9].pubkey, p.program);
         }
-        if op == 29 {
-            assert_eq!(&ix.data[1..33], o.provider.as_ref());
-            assert_eq!(ix.data[33], 1);
+        if name == "update_list" {
+            assert_eq!(&ix.data[8..40], o.provider.as_ref());
+            assert_eq!(ix.data[40], 1);
         }
-        if matches!(op, 30 | 33 | 34) {
-            assert_eq!(
-                ix.accounts[2].pubkey,
-                address::list_metadata(&p.program, &key(30)).0
-            );
-        }
-        if matches!(op, 33 | 34) {
-            assert_eq!(&ix.data[1..33], &d.sha256);
-            assert_eq!(&ix.data[33..], d.uri.as_bytes());
-        }
-        if op == 32 {
-            assert_eq!(&ix.data[1..], &85u32.to_le_bytes());
-            assert_eq!(
-                ix.accounts.iter().map(|a| a.pubkey).collect::<Vec<_>>(),
-                vec![
-                    p.market,
-                    m.model,
-                    m.terms,
-                    m.capacity,
-                    key(22),
-                    address::SYSTEM_PROGRAM
-                ]
-            );
+        if matches!(name, "initialize_list_metadata" | "update_list_metadata") {
+            assert_eq!(&ix.data[8..40], &d.sha256);
+            assert_eq!(&ix.data[40..44], &(d.uri.len() as u32).to_le_bytes());
+            assert_eq!(&ix.data[44..], d.uri.as_bytes());
         }
     }
     for limit in [0, 1, 4097, u32::MAX] {
@@ -338,14 +359,14 @@ fn reusable_variants_and_booking_fields_match_active_layout() {
             },
         )
         .unwrap();
-    assert_eq!(ix.data.len(), 116);
+    assert_eq!(ix.data.len(), 124);
     assert!(!ix.accounts[6].is_signer);
     assert!(!ix.accounts[7].is_signer);
-    assert_eq!(&ix.data[1..33], &q.model_id);
-    assert_eq!(&ix.data[47..51], &100u32.to_le_bytes());
-    assert_eq!(&ix.data[56..64], &10_000u64.to_le_bytes());
-    assert_eq!(&ix.data[76..108], q.cache_provider.as_ref());
-    assert_eq!(&ix.data[108..116], &7u64.to_le_bytes());
+    assert_eq!(&ix.data[8..40], &q.model_id);
+    assert_eq!(&ix.data[54..58], &100u32.to_le_bytes());
+    assert_eq!(&ix.data[63..71], &10_000u64.to_le_bytes());
+    assert_eq!(&ix.data[83..115], q.cache_provider.as_ref());
+    assert_eq!(&ix.data[116..124], &7u64.to_le_bytes());
     let receipt = Receipt {
         owner: u.owner,
         user: u.user,
@@ -366,16 +387,21 @@ fn reusable_variants_and_booking_fields_match_active_layout() {
         )
         .unwrap();
     assert_eq!(ix.data.len(), 141);
-    assert_eq!(&ix.data[13..21], &7u64.to_le_bytes());
+    assert_eq!(ix.data[20], 1);
     assert_eq!(&ix.data[21..], &receipt.encode());
     let decoded = PublishedReceipt::from_claim(&p.program, &ix).unwrap();
     assert_eq!(decoded.receipt, receipt);
     let mut wrong = ix;
-    wrong.data[13] = 8;
+    wrong.data[20] = 2;
     assert!(PublishedReceipt::from_claim(&p.program, &wrong).is_err());
     assert_eq!(
         p.expire(k, Some(7)).unwrap().data,
-        [8, 7, 0, 0, 0, 0, 0, 0, 0]
+        [
+            discriminator("expire_booking").as_slice(),
+            &[1],
+            &7u64.to_le_bytes()
+        ]
+        .concat()
     );
     assert!(p.release(k, Some(0)).is_err());
     assert!(p.close(k.booking, key(22), true).accounts[1].is_signer);
@@ -454,6 +480,8 @@ fn matching_uses_list_full_caps_cache_identity_capacity_and_stable_ties() {
         market: key(2),
         authority: key(8),
         limit: 8,
+        fee_bps: 10,
+        protocol_share: 10_000,
         providers: vec![key(10), key(11)],
     };
     let mut capacity = CapacityBook {
@@ -505,9 +533,9 @@ fn matching_uses_list_full_caps_cache_identity_capacity_and_stable_ties() {
             .unwrap()
             .unwrap()
             .reserve,
-        151
+        152
     );
-    assert!(q.select(&terms, &capacity, &list, 150).unwrap().is_none());
+    assert!(q.select(&terms, &capacity, &list, 151).unwrap().is_none());
     list.providers = vec![key(10)];
     assert!(
         q.select(&terms, &capacity, &list, 10_000)
@@ -631,12 +659,11 @@ fn provider_lists_validate_size_order_duplicates_and_account_owner() {
     put(&mut account.data, 8, p.market.as_ref());
     put(&mut account.data, 40, key(8).as_ref());
     put(&mut account.data, 72, &3u32.to_le_bytes());
-    put(&mut account.data, 76, &2u32.to_le_bytes());
-    put(&mut account.data, 80, key(10).as_ref());
-    put(&mut account.data, 112, key(11).as_ref());
-    let tree = LIST_HEADER_LEN + 3 * 32;
-    put(&mut account.data, tree, key(11).as_ref());
-    put(&mut account.data, tree + 32, key(10).as_ref());
+    put(&mut account.data, 76, &10u16.to_le_bytes());
+    put(&mut account.data, 78, &10_000u16.to_le_bytes());
+    put(&mut account.data, 84, &2u32.to_le_bytes());
+    put(&mut account.data, 88, key(10).as_ref());
+    put(&mut account.data, 120, key(11).as_ref());
     let list = ProviderList::decode(&key(30), &account, &p.program).unwrap();
     assert!(list.contains(&key(10)));
     assert!(!list.contains(&key(12)));
@@ -644,22 +671,22 @@ fn provider_lists_validate_size_order_duplicates_and_account_owner() {
         serde_json::to_value(&list).unwrap()["providers"][0],
         key(10).to_string()
     );
-    for offset in [72, 76] {
+    for offset in [72, 84] {
         let mut bad = account.clone();
         put(&mut bad.data, offset, &4097u32.to_le_bytes());
         assert!(ProviderList::decode(&key(30), &bad, &p.program).is_err());
     }
     for provider in [key(9), key(10)] {
         let mut bad = account.clone();
-        put(&mut bad.data, 112, provider.as_ref());
+        put(&mut bad.data, 120, provider.as_ref());
         assert!(ProviderList::decode(&key(30), &bad, &p.program).is_err());
     }
-    for at in [144, tree + 64] {
+    for at in [152, 183] {
         let mut bad = account.clone();
         bad.data[at] = 1;
         assert!(ProviderList::decode(&key(30), &bad, &p.program).is_err());
     }
-    for slot_len in [32, 40] {
+    for slot_len in [16, 24] {
         let mut short = account.clone();
         short.data.truncate(LIST_HEADER_LEN + 3 * slot_len);
         assert!(ProviderList::decode(&key(30), &short, &p.program).is_err());
@@ -668,8 +695,8 @@ fn provider_lists_validate_size_order_duplicates_and_account_owner() {
     assert!(ProviderList::decode(&key(30), &account, &p.program).is_err());
     assert!(list_size(0).is_err());
     assert!(list_size(4097).is_err());
-    assert_eq!(list_size(256).unwrap(), 16464);
-    assert_eq!(list_size(4096).unwrap(), 262224);
+    assert_eq!(list_size(256).unwrap(), 8280);
+    assert_eq!(list_size(4096).unwrap(), 131160);
 }
 
 #[test]
@@ -794,12 +821,12 @@ fn remaining_accounts_decode_exact_fields_and_reject_malformed_records() {
     put(&mut user.data, 40, p.market.as_ref());
     put(&mut user.data, 72, &u64::MAX.to_le_bytes());
     put(&mut user.data, 80, u.vault.as_ref());
-    user.data[112] = address::vault(&p.program, &u.user).1;
-    user.data[113..120].fill(255);
+    user.data[120] = address::vault(&p.program, &u.user).1;
+    user.data[112..120].fill(255);
     let decoded = User::decode(&u.user, &user, &p.program).unwrap();
-    assert_eq!(decoded.generation, (1 << 56) - 1);
+    assert_eq!(decoded.generation, u64::MAX);
     assert_eq!(decoded.free, u64::MAX);
-    user.data[112] ^= 1;
+    user.data[120] ^= 1;
     assert!(User::decode(&u.user, &user, &p.program).is_err());
     let (metadata, bump) = address::model_metadata(&p.program, &m.model);
     let mut account = raw(p.program, ModelMetadata::MAGIC, MODEL_METADATA_LEN);
@@ -892,4 +919,155 @@ fn metadata_uri_matches_indexer_rules_and_preserves_public_queries() {
     ] {
         assert!(fossa_sdk::hosted::validate_api_origin(origin).is_err());
     }
+}
+
+#[test]
+fn list_surcharge_matches_reserve_charge_and_snapshotted_destinations() {
+    let (protocol, model, user, _, settlement) = context();
+    let mut raw = raw(protocol.program, Booking::MAGIC, BOOKING_LEN);
+    for (at, value) in [
+        (8, user.owner),
+        (40, key(10)),
+        (72, protocol.market),
+        (192, user.user),
+        (224, model.model),
+        (288, key(11)),
+        (368, key(20)),
+        (400, key(21)),
+    ] {
+        put(&mut raw.data, at, value.as_ref());
+    }
+    put(&mut raw.data, 104, &153u64.to_le_bytes());
+    for at in [112, 116, 120] {
+        put(&mut raw.data, at, &1_000_000u32.to_le_bytes());
+    }
+    put(&mut raw.data, 124, &100u32.to_le_bytes());
+    put(&mut raw.data, 128, &50u32.to_le_bytes());
+    put(&mut raw.data, 152, &u64::MAX.to_le_bytes());
+    put(&mut raw.data, 464, &100u16.to_le_bytes());
+    put(&mut raw.data, 466, &10_000u16.to_le_bytes());
+    let booking = Booking::decode(&settlement.booking, &raw, &protocol.program).unwrap();
+    let usage = Usage {
+        uncached: 100,
+        cached: 0,
+        output: 50,
+    };
+    let receipt = Receipt::from_booking(settlement.booking, &booking, usage).unwrap();
+    assert_eq!(receipt.charge, 152);
+    assert_eq!(
+        with_list_fee(booking.rates.reserve(100, 50), 100).unwrap(),
+        153
+    );
+    let expected = [
+        address::associated_token(&protocol.mint, &key(20)),
+        address::associated_token(&protocol.mint, &key(21)),
+    ];
+    assert_eq!(booking.fee_destinations(&protocol.mint), Some(expected));
+    let keys =
+        SettlementKeys::from_booking(settlement.booking, &booking, model, user, &protocol.mint)
+            .unwrap();
+    let claim = protocol.claim(keys, usage, Some(&receipt)).unwrap();
+    assert_eq!(claim.accounts.len(), 13);
+    assert_eq!(
+        claim.accounts[11..]
+            .iter()
+            .map(|a| a.pubkey)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        PublishedReceipt::from_claim(&protocol.program, &claim)
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    let mut backing = booking;
+    backing.reserve_destination = true;
+    assert_eq!(
+        backing.fee_destinations(&protocol.mint).unwrap()[1],
+        key(21)
+    );
+    assert!(with_list_fee(u64::MAX, 100).is_err());
+}
+
+#[test]
+fn historical_receipts_remain_decodable_after_native_upgrade() {
+    let (protocol, _, user, _, keys) = context();
+    let receipt = Receipt {
+        owner: user.owner,
+        user: user.user,
+        booking: keys.booking,
+        generation: 7,
+        charge: 11,
+        claim_end: 123,
+    };
+    let usage = Usage {
+        uncached: 3,
+        cached: 2,
+        output: 1,
+    };
+    let mut old = protocol.claim(keys, usage, Some(&receipt)).unwrap();
+    old.data = [
+        vec![7],
+        3u32.to_le_bytes().to_vec(),
+        2u32.to_le_bytes().to_vec(),
+        1u32.to_le_bytes().to_vec(),
+        7u64.to_le_bytes().to_vec(),
+        receipt.encode().to_vec(),
+    ]
+    .concat();
+    let decoded = PublishedReceipt::from_claim(&protocol.program, &old).unwrap();
+    assert_eq!(decoded.receipt, receipt);
+    assert_eq!(decoded.usage, usage);
+    old.data[13] = 8;
+    assert!(PublishedReceipt::from_claim(&protocol.program, &old).is_err());
+}
+
+#[test]
+fn historical_bucket_receipts_keep_generation_and_index_bounds() {
+    let (protocol, _, user, _, keys) = context();
+    let mut receipt = Receipt {
+        owner: user.owner,
+        user: user.user,
+        booking: keys.booking,
+        generation: 7,
+        charge: 11,
+        claim_end: 123,
+    };
+    let usage = Usage {
+        uncached: 3,
+        cached: 2,
+        output: 1,
+    };
+    let mut old = protocol.claim(keys, usage, Some(&receipt)).unwrap();
+    old.accounts
+        .push(fossa_sdk::AccountMeta::new(key(99), false));
+    let legacy = |receipt: &Receipt, index: u64| {
+        [
+            vec![7],
+            3u32.to_le_bytes().to_vec(),
+            2u32.to_le_bytes().to_vec(),
+            1u32.to_le_bytes().to_vec(),
+            receipt.generation.to_le_bytes().to_vec(),
+            42u64.to_le_bytes().to_vec(),
+            index.to_le_bytes().to_vec(),
+            receipt.encode().to_vec(),
+        ]
+        .concat()
+    };
+    old.data = legacy(&receipt, 9);
+    assert_eq!(
+        PublishedReceipt::from_claim(&protocol.program, &old)
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    old.data = legacy(&receipt, 65535);
+    assert!(PublishedReceipt::from_claim(&protocol.program, &old).is_err());
+    receipt.generation = 1u64 << 56;
+    old.data = legacy(&receipt, 9);
+    assert!(PublishedReceipt::from_claim(&protocol.program, &old).is_err());
+    old.accounts.pop();
+    old.data.drain(21..37);
+    assert!(PublishedReceipt::from_claim(&protocol.program, &old).is_err());
 }

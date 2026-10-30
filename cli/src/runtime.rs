@@ -136,7 +136,7 @@ impl Runtime {
     }
 }
 pub fn instruction_view(instructions: &[Instruction]) -> Vec<Value> {
-    instructions.iter().map(|ix| json!({"program":ix.program_id.to_string(),"opcode":ix.data.first(),"data_hex":hex(&ix.data),"accounts":ix.accounts.iter().map(|a| json!({"address":a.pubkey.to_string(),"signer":a.is_signer,"writable":a.is_writable})).collect::<Vec<_>>()})).collect()
+    instructions.iter().map(|ix| json!({"program":ix.program_id.to_string(),"discriminator":hex(ix.data.get(..8).unwrap_or(&ix.data)),"data_hex":hex(&ix.data),"accounts":ix.accounts.iter().map(|a| json!({"address":a.pubkey.to_string(),"signer":a.is_signer,"writable":a.is_writable})).collect::<Vec<_>>()})).collect()
 }
 pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;

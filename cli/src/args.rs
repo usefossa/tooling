@@ -90,6 +90,12 @@ pub enum Command {
     /// Inspect model accounts or update metadata owned by your wallet
     #[command(subcommand, after_help = DOCS)]
     Model(ModelCommand),
+    /// Manage shared model markets and redeem their backing
+    #[command(subcommand, after_help = DOCS)]
+    Group(GroupCommand),
+    /// Inspect and configure router governance policy
+    #[command(subcommand, after_help = DOCS)]
+    Council(CouncilCommand),
     /// Inspect offers; edit selected fields while preserving others
     #[command(subcommand, after_help = DOCS)]
     Offer(OfferCommand),
@@ -163,6 +169,17 @@ pub enum ModelCommand {
     /// Inspect model, books and metadata reference
     #[command(after_help = DOCS)]
     Show(ModelArg),
+    /// Council assigns an existing shared model market
+    #[command(after_help = DOCS)]
+    AssignGroup {
+        #[command(flatten)]
+        model: ModelArg,
+        #[arg(long)]
+        group: Pubkey,
+    },
+    /// Council sends future bookings' protocol fees to treasury
+    #[command(after_help = DOCS)]
+    ClearGroup(ModelArg),
     /// Increase permanent offer slots; any payer may fund rent for up to 85 new slots
     #[command(after_help = DOCS)]
     Grow {
@@ -179,6 +196,121 @@ pub enum ModelCommand {
         model: ModelArg,
         #[command(flatten)]
         document: DocumentArgs,
+    },
+}
+#[derive(Subcommand, Debug)]
+pub enum GroupCommand {
+    /// Inspect shared market, token metadata and USDC backing
+    #[command(after_help = DOCS)]
+    Show {
+        #[arg(long)]
+        group: Pubkey,
+    },
+    /// Launch using prepared InitializeModelGroup JSON accounts and GroupInit JSON parameters
+    #[command(after_help = DOCS)]
+    Create {
+        #[arg(long)]
+        accounts_file: PathBuf,
+        #[arg(long)]
+        parameters_file: PathBuf,
+        /// Fresh backing signer; required only with --execute
+        #[arg(long)]
+        backing_keypair: Option<PathBuf>,
+        /// Fresh curve LP signer; required only with --execute
+        #[arg(long)]
+        curve_lp_keypair: Option<PathBuf>,
+    },
+    /// Council replaces token name, symbol and URI
+    #[command(after_help = DOCS)]
+    UpdateMetadata {
+        #[arg(long)]
+        group: Pubkey,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        uri: String,
+    },
+    /// Council configures future fee routing and token transfer tax
+    #[command(after_help = DOCS)]
+    ConfigureReserve {
+        #[arg(long)]
+        group: Pubkey,
+        #[arg(long, action = clap::ArgAction::Set)]
+        route_to_reserve: bool,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(0..=10000))]
+        tax_bps: u16,
+        /// Maximum transfer tax in model-token atomic units
+        #[arg(long)]
+        maximum_tax: u64,
+    },
+    /// Burn model-token atoms for proportional USDC backing
+    #[command(after_help = DOCS)]
+    Redeem {
+        #[arg(long)]
+        group: Pubkey,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        amount: u64,
+        /// Minimum USDC received, in atomic units
+        #[arg(long)]
+        minimum_output: u64,
+        #[arg(long)]
+        source: Option<Pubkey>,
+        #[arg(long)]
+        destination: Option<Pubkey>,
+    },
+    /// Permissionlessly collect harvested model-token tax into bank's token account
+    #[command(after_help = DOCS)]
+    CollectTax {
+        #[arg(long)]
+        group: Pubkey,
+        #[arg(long)]
+        destination: Pubkey,
+    },
+    /// Sweep residual backing to treasury only after token supply reaches zero
+    #[command(after_help = DOCS)]
+    Sweep {
+        #[arg(long)]
+        group: Pubkey,
+        #[arg(long)]
+        destination: Option<Pubkey>,
+    },
+}
+#[derive(Subcommand, Debug)]
+pub enum CouncilCommand {
+    /// Inspect council, bank, list-creation policy and configured DEX
+    #[command(after_help = DOCS)]
+    Show,
+    /// Patch list-creation policy; omitted fields retain current settings
+    #[command(after_help = DOCS)]
+    ConfigureFees {
+        #[arg(long)]
+        bank: Option<Pubkey>,
+        #[arg(long)]
+        creation_mint: Option<Pubkey>,
+        #[arg(long)]
+        creation_token_program: Option<Pubkey>,
+        /// Required net payment in governance-token atomic units
+        #[arg(long)]
+        creation_net_price: Option<u64>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        creation_enabled: Option<bool>,
+    },
+    /// Bind the router to an initialized, council-authorized DEX
+    #[command(after_help = DOCS)]
+    ConfigureDex {
+        #[arg(long)]
+        program: Pubkey,
+    },
+    /// Rotate council and treasury together; both wallets must authorize
+    #[command(after_help = DOCS)]
+    Rotate {
+        #[arg(long)]
+        next: Pubkey,
+        /// Next council signer; required only with --execute
+        #[arg(long)]
+        next_keypair: Option<PathBuf>,
     },
 }
 #[derive(Args, Debug)]
@@ -246,6 +378,15 @@ pub enum ListCommand {
     Create {
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
         capacity: u32,
+        /// Inference surcharge in basis points (10-300)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
+        fee_bps: u16,
+        /// Protocol share of the surcharge in basis points (5000-10000)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(5000..=10000))]
+        protocol_share_bps: u16,
+        /// Maximum creation-token debit in atomic units
+        #[arg(long)]
+        maximum_payment: u64,
         /// Optional profile JSON; exact bytes determine SHA-256
         #[arg(long)]
         metadata_file: Option<PathBuf>,
@@ -260,6 +401,16 @@ pub enum ListCommand {
         list: Pubkey,
         #[command(flatten)]
         profile: ListProfileArgs,
+    },
+    /// Update list surcharge and protocol share for future bookings
+    #[command(after_help = DOCS)]
+    ConfigureFees {
+        #[arg(long)]
+        list: Pubkey,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
+        fee_bps: u16,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(5000..=10000))]
+        protocol_share_bps: u16,
     },
     /// Add a provider public key to your list
     #[command(after_help = DOCS)]
@@ -352,6 +503,7 @@ pub enum AccountKind {
     Provider,
     Model,
     ModelMetadata,
+    ModelGroup,
     User,
     Terms,
     Capacity,

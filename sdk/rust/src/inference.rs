@@ -112,7 +112,6 @@ fn statement_hash(
     generation: u64,
     hash: &str,
 ) -> Result<String> {
-    ensure(generation < (1u64 << 56), "inference generation")?;
     Ok(if generation == 0 {
         format!("fossa-infer-v1:{booking}:{provider}:{hash}")
     } else {
@@ -251,7 +250,7 @@ impl Authorization {
             })
             .transpose()?
             .unwrap_or("0");
-        ensure(generation.len() <= 17, "inference generation length")?;
+        ensure(generation.len() <= 20, "inference generation length")?;
         let signature = get("x-fossa-signature")?;
         ensure(signature.len() == 88, "inference signature length")?;
         let mut bytes = [0; 66];
@@ -267,7 +266,6 @@ impl Authorization {
             "inference body hash",
         )?;
         let generation = crate::amount::parse_atomic(generation)?;
-        ensure(generation < (1u64 << 56), "inference generation")?;
         Ok(Self {
             booking: get("x-fossa-booking")?
                 .parse()

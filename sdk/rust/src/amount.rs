@@ -76,3 +76,9 @@ pub fn parse_usdc(value: &str) -> Result<u64> {
 pub fn format_usdc(atomic: u64) -> String {
     format!("{}.{:06}", atomic / UNIT, atomic % UNIT)
 }
+
+pub fn with_list_fee(amount: u64, fee_bps: u16) -> Result<u64> {
+    ensure(fee_bps <= 300, "list surcharge")?;
+    let fee = (u128::from(amount) * u128::from(fee_bps)).div_ceil(10_000) as u64;
+    amount.checked_add(fee).ok_or(Error::Arithmetic)
+}

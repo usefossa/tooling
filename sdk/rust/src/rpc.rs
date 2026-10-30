@@ -3,7 +3,7 @@ use crate::{
     accounts::{CapacityBook, Decode, Market, Model, RawAccount, TermsBook},
     ensure,
     hosted::{HostedClient, RPC_PATH, http_client, response_bytes},
-    instruction::{ModelKeys, Protocol},
+    instruction::Protocol,
     transaction::{PendingTransaction, PreparedTransaction},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -678,19 +678,5 @@ impl RpcClient {
             self.commitment
         };
         self.call("getTransaction",json!([signature.to_string(),{"encoding":"json","commitment":commitment,"maxSupportedTransactionVersion":0}])).await
-    }
-    pub async fn create_model_books(
-        &self,
-        protocol: &Protocol,
-        payer: Pubkey,
-        model: ModelKeys,
-        limit: u32,
-    ) -> Result<Vec<Instruction>> {
-        let [terms, capacity] = crate::instruction::book_sizes(limit)?;
-        let (terms_rent, capacity_rent) = tokio::join!(self.rent(terms), self.rent(capacity));
-        Ok(vec![
-            protocol.create_account(payer, model.terms, terms_rent?, terms)?,
-            protocol.create_account(payer, model.capacity, capacity_rent?, capacity)?,
-        ])
     }
 }

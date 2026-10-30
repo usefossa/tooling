@@ -5,19 +5,19 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const MARKET_LEN: usize = 72;
-pub const MODEL_LEN: usize = 144;
+pub const MARKET_LEN: usize = 248;
+pub const MODEL_LEN: usize = 176;
 pub const PROVIDER_LEN: usize = 364;
 pub const MODEL_METADATA_LEN: usize = 396;
 pub const LIST_METADATA_LEN: usize = 396;
-pub const USER_LEN: usize = 120;
-pub const BOOKING_LEN: usize = 368;
+pub const USER_LEN: usize = 128;
+pub const BOOKING_LEN: usize = 472;
 pub const HEADER_LEN: usize = 48;
 pub const TERMS_LEN: usize = 120;
 pub const CAPACITY_LEN: usize = 32;
 pub const MAX_ENTRIES: u32 = 4096;
-pub const LIST_HEADER_LEN: usize = 80;
-pub const LIST_SLOT_LEN: usize = 64;
+pub const LIST_HEADER_LEN: usize = 88;
+pub const LIST_SLOT_LEN: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RawAccount {
@@ -33,7 +33,7 @@ pub trait Decode: Sized {
     fn decode(address: &Pubkey, account: &RawAccount, program: &Pubkey) -> Result<Self>;
 }
 
-fn state<'a>(
+pub(crate) fn state<'a>(
     account: &'a RawAccount,
     program: &Pubkey,
     magic: &[u8; 8],
@@ -63,7 +63,7 @@ pub(crate) fn n64(d: &[u8], at: usize) -> u64 {
 pub(crate) fn i64le(d: &[u8], at: usize) -> i64 {
     i64::from_le_bytes(d[at..at + 8].try_into().unwrap())
 }
-fn flag(d: &[u8], at: usize) -> Result<bool> {
+pub(crate) fn flag(d: &[u8], at: usize) -> Result<bool> {
     ensure(d[at] <= 1, "boolean flag")?;
     Ok(d[at] == 1)
 }
@@ -91,7 +91,12 @@ impl DocumentRef {
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         Self::new(self.sha256, self.uri.clone())?;
-        Ok([self.sha256.as_slice(), self.uri.as_bytes()].concat())
+        Ok([
+            self.sha256.as_slice(),
+            &(self.uri.len() as u32).to_le_bytes(),
+            self.uri.as_bytes(),
+        ]
+        .concat())
     }
     fn decode(d: &[u8], hash: usize, uri: usize) -> Result<Self> {
         let len = usize::from(n16(d, hash + 32));
@@ -109,17 +114,36 @@ impl DocumentRef {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Market {
     #[serde(with = "crate::serde_pubkey")]
-    pub admin: Pubkey,
+    pub council: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
     pub mint: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub bank: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub creation_mint: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub creation_token_program: Pubkey,
+    pub creation_net_price: u64,
+    pub creation_enabled: bool,
+    #[serde(with = "crate::serde_pubkey")]
+    pub dex_program: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub dex_config: Pubkey,
 }
 impl Decode for Market {
-    const MAGIC: &'static [u8; 8] = b"FOSSAV20";
+    const MAGIC: &'static [u8; 8] = &[219, 190, 213, 55, 0, 227, 198, 154];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, MARKET_LEN)?;
         Ok(Self {
-            admin: key(d, 8),
+            council: key(d, 8),
             mint: key(d, 40),
+            bank: key(d, 72),
+            creation_mint: key(d, 104),
+            creation_token_program: key(d, 136),
+            creation_net_price: n64(d, 168),
+            creation_enabled: flag(d, 176)?,
+            dex_program: key(d, 184),
+            dex_config: key(d, 216),
         })
     }
 }
@@ -135,9 +159,11 @@ pub struct Model {
     pub capacity: Pubkey,
     pub limit: u32,
     pub bump: u8,
+    #[serde(with = "crate::serde_pubkey")]
+    pub group: Pubkey,
 }
 impl Decode for Model {
-    const MAGIC: &'static [u8; 8] = b"MODELV20";
+    const MAGIC: &'static [u8; 8] = &[152, 221, 247, 122, 185, 125, 223, 151];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, MODEL_LEN)?;
         let value = Self {
@@ -147,6 +173,7 @@ impl Decode for Model {
             capacity: key(d, 104),
             limit: n32(d, 136),
             bump: d[140],
+            group: key(d, 144),
         };
         ensure(
             (1..=MAX_ENTRIES).contains(&value.limit) && value.terms != value.capacity,
@@ -170,7 +197,7 @@ pub struct Provider {
     pub bump: u8,
 }
 impl Decode for Provider {
-    const MAGIC: &'static [u8; 8] = b"PROV0V20";
+    const MAGIC: &'static [u8; 8] = &[164, 180, 71, 17, 75, 216, 80, 195];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, PROVIDER_LEN)?;
         let value = Self {
@@ -199,7 +226,7 @@ pub struct ModelMetadata {
     pub bump: u8,
 }
 impl Decode for ModelMetadata {
-    const MAGIC: &'static [u8; 8] = b"MMETAV20";
+    const MAGIC: &'static [u8; 8] = &[243, 161, 2, 132, 123, 88, 51, 61];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, MODEL_METADATA_LEN)?;
         let value = Self {
@@ -230,18 +257,16 @@ pub struct User {
     pub generation: u64,
 }
 impl Decode for User {
-    const MAGIC: &'static [u8; 8] = b"USER0V20";
+    const MAGIC: &'static [u8; 8] = &[159, 117, 95, 227, 239, 151, 58, 236];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, USER_LEN)?;
-        let mut generation = [0; 8];
-        generation[..7].copy_from_slice(&d[113..120]);
         let value = Self {
             owner: key(d, 8),
             market: key(d, 40),
             free: n64(d, 72),
             vault: key(d, 80),
-            bump: d[112],
-            generation: u64::from_le_bytes(generation),
+            bump: d[120],
+            generation: n64(d, 112),
         };
         ensure(address::vault(p, at).1 == value.bump, "user vault PDA bump")?;
         Ok(value)
@@ -317,7 +342,7 @@ fn book<'a>(
     Ok((d, key(d, 8), limit, count as usize))
 }
 impl Decode for TermsBook {
-    const MAGIC: &'static [u8; 8] = b"TERMSV20";
+    const MAGIC: &'static [u8; 8] = &[223, 24, 40, 223, 249, 219, 14, 97];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let (d, model, limit, count) = book(a, p, Self::MAGIC, TERMS_LEN)?;
         let mut entries = Vec::with_capacity(count);
@@ -348,7 +373,7 @@ impl Decode for TermsBook {
     }
 }
 impl Decode for CapacityBook {
-    const MAGIC: &'static [u8; 8] = b"CAPACV20";
+    const MAGIC: &'static [u8; 8] = &[19, 216, 196, 142, 39, 29, 145, 16];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let (d, model, limit, count) = book(a, p, Self::MAGIC, CAPACITY_LEN)?;
         let entries = d[48..48 + count * CAPACITY_LEN]
@@ -417,9 +442,18 @@ pub struct Booking {
     pub requested_privacy: bool,
     pub cache_allowed: bool,
     pub estimated_score: u64,
+    #[serde(with = "crate::serde_pubkey")]
+    pub creator: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub protocol_destination: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub reserve_authority: Pubkey,
+    pub fee_bps: u16,
+    pub protocol_share: u16,
+    pub reserve_destination: bool,
 }
 impl Decode for Booking {
-    const MAGIC: &'static [u8; 8] = b"BOOK0V20";
+    const MAGIC: &'static [u8; 8] = &[147, 50, 61, 138, 208, 21, 254, 156];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, BOOKING_LEN)?;
         let status = match d[148] {
@@ -457,6 +491,12 @@ impl Decode for Booking {
             requested_privacy: flag(d, 357)?,
             cache_allowed: flag(d, 358)?,
             estimated_score: n64(d, 360),
+            creator: key(d, 368),
+            protocol_destination: key(d, 400),
+            reserve_authority: key(d, 432),
+            fee_bps: n16(d, 464),
+            protocol_share: n16(d, 466),
+            reserve_destination: flag(d, 468)?,
         })
     }
 }
@@ -468,6 +508,8 @@ pub struct ProviderList {
     #[serde(with = "crate::serde_pubkey")]
     pub authority: Pubkey,
     pub limit: u32,
+    pub fee_bps: u16,
+    pub protocol_share: u16,
     #[serde(serialize_with = "provider_keys")]
     pub providers: Vec<Pubkey>,
 }
@@ -491,7 +533,7 @@ pub struct ListMetadata {
     pub bump: u8,
 }
 impl Decode for ListMetadata {
-    const MAGIC: &'static [u8; 8] = b"LMETAV30";
+    const MAGIC: &'static [u8; 8] = &[245, 77, 238, 20, 114, 17, 94, 226];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, LIST_METADATA_LEN)?;
         let value = Self {
@@ -509,11 +551,11 @@ impl Decode for ListMetadata {
     }
 }
 impl Decode for ProviderList {
-    const MAGIC: &'static [u8; 8] = b"LIST0V30";
+    const MAGIC: &'static [u8; 8] = &[169, 24, 186, 110, 22, 139, 190, 82];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         ensure(a.data.len() >= LIST_HEADER_LEN, "provider list header")?;
         let limit = n32(&a.data, 72);
-        let count = n32(&a.data, 76);
+        let count = n32(&a.data, 84);
         ensure(
             (1..=MAX_ENTRIES).contains(&limit) && count <= limit,
             "provider list capacity",
@@ -524,15 +566,13 @@ impl Decode for ProviderList {
             Self::MAGIC,
             LIST_HEADER_LEN + limit as usize * LIST_SLOT_LEN,
         )?;
-        let tree = LIST_HEADER_LEN + limit as usize * 32;
         ensure(
-            d[LIST_HEADER_LEN + count as usize * 32..tree]
+            d[LIST_HEADER_LEN + count as usize * 32..]
                 .iter()
-                .all(|&b| b == 0)
-                && d[tree + count as usize * 32..].iter().all(|&b| b == 0),
+                .all(|&b| b == 0),
             "provider list unused slots",
         )?;
-        let providers: Vec<_> = d[80..80 + count as usize * 32]
+        let providers: Vec<_> = d[LIST_HEADER_LEN..LIST_HEADER_LEN + count as usize * 32]
             .as_chunks::<32>()
             .0
             .iter()
@@ -548,6 +588,8 @@ impl Decode for ProviderList {
             market: key(d, 8),
             authority: key(d, 40),
             limit,
+            fee_bps: n16(d, 76),
+            protocol_share: n16(d, 78),
             providers,
         })
     }
@@ -593,4 +635,54 @@ fn provider_keys<S: serde::Serializer>(
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .serialize(serializer)
+}
+
+impl Booking {
+    pub fn fee_destinations(&self, mint: &Pubkey) -> Option<[Pubkey; 2]> {
+        (self.fee_bps > 0).then(|| {
+            [
+                address::associated_token(mint, &self.creator),
+                if self.reserve_destination {
+                    self.protocol_destination
+                } else {
+                    address::associated_token(mint, &self.protocol_destination)
+                },
+            ]
+        })
+    }
+}
+
+pub const MODEL_GROUP_LEN: usize = 144;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModelGroup {
+    #[serde(with = "crate::serde_pubkey")]
+    pub market: Pubkey,
+    pub group_id: [u8; 32],
+    #[serde(with = "crate::serde_pubkey")]
+    pub backing_vault: Pubkey,
+    #[serde(with = "crate::serde_pubkey")]
+    pub fixed_token_mint: Pubkey,
+    pub route_to_reserve: bool,
+    pub bump: u8,
+}
+impl Decode for ModelGroup {
+    const MAGIC: &'static [u8; 8] = &[237, 175, 79, 136, 212, 228, 240, 177];
+    fn decode(at: &Pubkey, account: &RawAccount, program: &Pubkey) -> Result<Self> {
+        let d = state(account, program, Self::MAGIC, MODEL_GROUP_LEN)?;
+        let value = Self {
+            market: key(d, 8),
+            group_id: d[40..72].try_into().unwrap(),
+            backing_vault: key(d, 72),
+            fixed_token_mint: key(d, 104),
+            route_to_reserve: flag(d, 136)?,
+            bump: d[137],
+        };
+        ensure(
+            address::model_group(program, &value.market, &value.group_id) == (*at, value.bump)
+                && address::reserve_mint(program, at).0 == value.fixed_token_mint
+                && d[138..].iter().all(|&b| b == 0),
+            "model group PDA, mint or reserved bytes",
+        )?;
+        Ok(value)
+    }
 }

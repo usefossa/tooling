@@ -48,7 +48,7 @@ impl Receipt {
                 && (usage.cached == 0 || booking.cache_allowed),
             "claim usage",
         )?;
-        let charge = booking.rates.charge(usage);
+        let charge = crate::amount::with_list_fee(booking.rates.charge(usage), booking.fee_bps)?;
         ensure(charge <= booking.reserve, "claim charge")?;
         Ok(Self {
             owner: booking.owner,
@@ -68,16 +68,38 @@ pub struct PublishedReceipt {
 impl PublishedReceipt {
     pub fn from_claim(program: &Pubkey, ix: &Instruction) -> Result<Self> {
         ensure(
-            ix.program_id == *program
-                && ix.data.len() == 141
-                && ix.data[0] == 7
-                && ix.accounts.len() == 11,
+            ix.program_id == *program && matches!(ix.data.len(), 141 | 157),
             "published claim instruction",
         )?;
-        let p = &ix.data[1..];
-        let receipt = Receipt::decode(&p[20..])?;
+        let (payload, receipt) = if ix
+            .data
+            .starts_with(&crate::instruction::discriminator("claim_booking"))
+        {
+            ensure(
+                ix.data.len() == 141 && matches!(ix.accounts.len(), 11 | 13) && ix.data[20] == 1,
+                "published claim accounts or receipt",
+            )?;
+            (&ix.data[8..], Receipt::decode(&ix.data[21..])?)
+        } else {
+            ensure(ix.data[0] == 7, "historical claim instruction")?;
+            let receipt_offset = match (ix.data.len(), ix.accounts.len()) {
+                (141, 11) => 21,
+                (157, 12) => 37,
+                _ => return Err(crate::Error::Invalid("historical claim accounts")),
+            };
+            let receipt = Receipt::decode(&ix.data[receipt_offset..])?;
+            ensure(
+                receipt.generation < 1u64 << 56 && receipt.generation == n64(&ix.data, 13),
+                "historical receipt generation",
+            )?;
+            ensure(
+                receipt_offset != 37 || (receipt.charge > 0 && n64(&ix.data, 29) < 65_535),
+                "historical receipt bucket index",
+            )?;
+            (&ix.data[1..], receipt)
+        };
         ensure(
-            receipt.generation == n64(p, 12)
+            receipt.generation > 0
                 && receipt.booking == ix.accounts[4].pubkey
                 && receipt.user == ix.accounts[3].pubkey,
             "published receipt bindings",
@@ -85,9 +107,9 @@ impl PublishedReceipt {
         Ok(Self {
             receipt,
             usage: Usage {
-                uncached: crate::accounts::n32(p, 0),
-                cached: crate::accounts::n32(p, 4),
-                output: crate::accounts::n32(p, 8),
+                uncached: crate::accounts::n32(payload, 0),
+                cached: crate::accounts::n32(payload, 4),
+                output: crate::accounts::n32(payload, 8),
             },
         })
     }

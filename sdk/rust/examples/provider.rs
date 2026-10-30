@@ -70,8 +70,7 @@ fn main() -> Result<()> {
         "https://example.com/provider.json",
     )?;
     println!(
-        "prepared opcode {} with {} accounts",
-        instruction.data[0],
+        "Prepared update_profile with {} accounts",
         instruction.accounts.len()
     );
     Ok(())

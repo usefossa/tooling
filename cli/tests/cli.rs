@@ -115,9 +115,14 @@ fn rpc(req: &Value, value: Value) -> Value {
     json!({"jsonrpc":"2.0","id":req["id"],"result":value})
 }
 fn market_account(admin: Pubkey) -> Value {
-    let mut data = b"FOSSAV20".to_vec();
+    let mut data = <fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC.to_vec();
     data.extend(admin.as_ref());
     data.extend(key(3).as_ref());
+    data.resize(fossa_sdk::accounts::MARKET_LEN, 0);
+    data[104..136].copy_from_slice(key(4).as_ref());
+    data[136..168].copy_from_slice(fossa_sdk::address::TOKEN_PROGRAM.as_ref());
+    data[168..176].copy_from_slice(&1u64.to_le_bytes());
+    data[176] = 1;
     json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]})
 }
 fn signed() -> PendingTransaction {
@@ -250,7 +255,10 @@ fn provider_registration_default_plan_never_uploads_signs_or_writes() {
             .unwrap(),
     );
     assert_eq!(value["mode"], "plan");
-    assert_eq!(value["instructions"][0]["opcode"], 19);
+    assert_eq!(
+        value["instructions"][0]["discriminator"],
+        instruction_discriminator("initialize_provider")
+    );
     assert_eq!(calls.lock().unwrap().len(), 2);
     assert!(!dir.path().join("transactions").exists());
 }
@@ -496,8 +504,8 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     let terms_key = key(6);
     let capacity_key = key(7);
     let raw = |bytes: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
-    let mut m = vec![0; 144];
-    m[..8].copy_from_slice(b"MODELV20");
+    let mut m = vec![0; 176];
+    m[..8].copy_from_slice(<fossa_sdk::accounts::Model as fossa_sdk::accounts::Decode>::MAGIC);
     m[8..40].copy_from_slice(key(2).as_ref());
     m[40..72].copy_from_slice(&fossa_sdk::address::model_id("example/model"));
     m[72..104].copy_from_slice(terms_key.as_ref());
@@ -505,7 +513,7 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     m[136..140].copy_from_slice(&1u32.to_le_bytes());
     m[140] = bump;
     let mut t = vec![0; 168];
-    t[..8].copy_from_slice(b"TERMSV20");
+    t[..8].copy_from_slice(<fossa_sdk::accounts::TermsBook as fossa_sdk::accounts::Decode>::MAGIC);
     t[8..40].copy_from_slice(model.as_ref());
     t[40..44].copy_from_slice(&1u32.to_le_bytes());
     t[44..48].copy_from_slice(&1u32.to_le_bytes());
@@ -521,7 +529,8 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     t[160] = 1;
     t[164..168].copy_from_slice(&7u32.to_le_bytes());
     let mut c = vec![0; 80];
-    c[..8].copy_from_slice(b"CAPACV20");
+    c[..8]
+        .copy_from_slice(<fossa_sdk::accounts::CapacityBook as fossa_sdk::accounts::Decode>::MAGIC);
     c[8..40].copy_from_slice(model.as_ref());
     c[40..44].copy_from_slice(&1u32.to_le_bytes());
     c[44..48].copy_from_slice(&1u32.to_le_bytes());
@@ -557,7 +566,10 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
         value["details"]["next"],
         json!({"rates":{"input":1_000_000,"cached":500_000,"output":3_123_456},"speed_tps":300,"private":true,"active":false,"capacity":7})
     );
-    assert_eq!(value["instructions"][0]["opcode"], 5);
+    assert_eq!(
+        value["instructions"][0]["discriminator"],
+        instruction_discriminator("update_offer")
+    );
     assert!(!dir.path().join("transactions").exists());
 }
 
@@ -570,24 +582,33 @@ fn booking_budget_counts_every_permanent_slot_and_preserves_packet_limit() {
         let id = fossa_sdk::address::model_id("example/model");
         let (model, bump) = fossa_sdk::address::model(&key(1), &key(2), &id);
         let raw = |bytes: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
-        let mut m = vec![0; 144];
-        m[..8].copy_from_slice(b"MODELV20");
+        let mut m = vec![0; 176];
+        m[..8].copy_from_slice(<fossa_sdk::accounts::Model as fossa_sdk::accounts::Decode>::MAGIC);
         m[8..40].copy_from_slice(key(2).as_ref());
         m[40..72].copy_from_slice(&id);
         m[72..104].copy_from_slice(key(6).as_ref());
         m[104..136].copy_from_slice(key(7).as_ref());
         m[136..140].copy_from_slice(&count.to_le_bytes());
         m[140] = bump;
-        let mut u = vec![0; 120];
-        u[..8].copy_from_slice(b"USER0V20");
+        let mut u = vec![0; 128];
+        u[..8].copy_from_slice(<fossa_sdk::accounts::User as fossa_sdk::accounts::Decode>::MAGIC);
         u[8..40].copy_from_slice(wallet.as_ref());
         u[40..72].copy_from_slice(key(2).as_ref());
         u[72..80].copy_from_slice(&1_000_000u64.to_le_bytes());
         u[80..112].copy_from_slice(key(11).as_ref());
-        u[112] = fossa_sdk::address::vault(&key(1), &user).1;
+        u[120] = fossa_sdk::address::vault(&key(1), &user).1;
         let mut t = vec![0; 48 + count as usize * 120];
         let mut c = vec![0; 48 + count as usize * 32];
-        for (book, magic) in [(&mut t, b"TERMSV20"), (&mut c, b"CAPACV20")] {
+        for (book, magic) in [
+            (
+                &mut t,
+                <fossa_sdk::accounts::TermsBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+            (
+                &mut c,
+                <fossa_sdk::accounts::CapacityBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+        ] {
             book[..8].copy_from_slice(magic);
             book[8..40].copy_from_slice(model.as_ref());
             book[40..44].copy_from_slice(&count.to_le_bytes());
@@ -608,13 +629,16 @@ fn booking_budget_counts_every_permanent_slot_and_preserves_packet_limit() {
             c[48 + slot * 32..56 + slot * 32].copy_from_slice(&1_000_000u64.to_le_bytes());
         }
         let mut list = vec![0; fossa_sdk::instruction::list_size(1).unwrap()];
-        list[..8].copy_from_slice(b"LIST0V30");
+        list[..8].copy_from_slice(
+            <fossa_sdk::accounts::ProviderList as fossa_sdk::accounts::Decode>::MAGIC,
+        );
         list[8..40].copy_from_slice(key(2).as_ref());
         list[40..72].copy_from_slice(wallet.as_ref());
         list[72..76].copy_from_slice(&1u32.to_le_bytes());
-        list[76..80].copy_from_slice(&1u32.to_le_bytes());
-        list[80..112].copy_from_slice(key(12).as_ref());
-        list[112..144].copy_from_slice(key(12).as_ref());
+        list[76..78].copy_from_slice(&100u16.to_le_bytes());
+        list[78..80].copy_from_slice(&10_000u16.to_le_bytes());
+        list[84..88].copy_from_slice(&1u32.to_le_bytes());
+        list[88..120].copy_from_slice(key(12).as_ref());
         let list = raw(list);
         let (m, u, t, c) = (raw(m), raw(u), raw(t), raw(c));
         let mock = mock(move |_, req| {
@@ -798,7 +822,10 @@ fn onboarding_plans_permissionless_registration_without_uploading() {
     );
     assert_eq!(value["blockers"], json!([]));
     assert_eq!(value["steps"].as_array().unwrap().len(), 1);
-    assert_eq!(value["steps"][0]["instructions"][0]["opcode"], 19);
+    assert_eq!(
+        value["steps"][0]["instructions"][0]["discriminator"],
+        instruction_discriminator("initialize_provider")
+    );
     assert!(!dir.path().join("transactions/pending.json").exists());
 }
 #[test]
@@ -998,7 +1025,7 @@ fn pinned_protocol_needs_no_public_config_lookup_and_hosted_rpc_is_default() {
     )
     .unwrap();
     let market = "8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som";
-    let mut data = b"FOSSAV20".to_vec();
+    let mut data = <fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC.to_vec();
     data.extend(key(4).as_ref());
     data.extend(
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -1006,6 +1033,7 @@ fn pinned_protocol_needs_no_public_config_lookup_and_hosted_rpc_is_default() {
             .unwrap()
             .as_ref(),
     );
+    data.resize(fossa_sdk::accounts::MARKET_LEN, 0);
     let account = json!({"owner":"F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT","lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]});
     let paths = Arc::new(Mutex::new(Vec::new()));
     let seen = paths.clone();
@@ -1091,13 +1119,16 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     ]));
     {
         let mut d = data.lock().unwrap();
-        d[..8].copy_from_slice(b"LIST0V30");
+        d[..8].copy_from_slice(
+            <fossa_sdk::accounts::ProviderList as fossa_sdk::accounts::Decode>::MAGIC,
+        );
         d[8..40].copy_from_slice(key(2).as_ref());
         d[40..72].copy_from_slice(owner.as_ref());
         d[72..76].copy_from_slice(&2u32.to_le_bytes());
-        d[76..80].copy_from_slice(&1u32.to_le_bytes());
-        d[80..112].copy_from_slice(key(6).as_ref());
-        d[144..176].copy_from_slice(key(6).as_ref());
+        d[76..78].copy_from_slice(&100u16.to_le_bytes());
+        d[78..80].copy_from_slice(&10_000u16.to_le_bytes());
+        d[84..88].copy_from_slice(&1u32.to_le_bytes());
+        d[88..120].copy_from_slice(key(6).as_ref());
     }
     let state = data.clone();
     let mock = mock(move |_, req| {
@@ -1118,8 +1149,25 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
         command.args(args).output().unwrap()
     };
     let address = list.to_string();
-    let create = result(invoke(owner, &["list", "create", "--capacity", "2"]));
-    assert_eq!(create["instructions"][2]["opcode"], 28);
+    let create = result(invoke(
+        owner,
+        &[
+            "list",
+            "create",
+            "--fee-bps",
+            "100",
+            "--protocol-share-bps",
+            "10000",
+            "--maximum-payment",
+            "1",
+            "--capacity",
+            "2",
+        ],
+    ));
+    assert_eq!(
+        create["instructions"][1]["discriminator"],
+        instruction_discriminator("initialize_list")
+    );
     assert!(
         create["details"]["list"]
             .as_str()
@@ -1142,7 +1190,11 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     ));
     assert_eq!(
         add["instructions"][1]["data_hex"],
-        format!("1d{}01", "07".repeat(32))
+        format!(
+            "{}{}01",
+            instruction_discriminator("update_list"),
+            "07".repeat(32)
+        )
     );
     let remove = result(invoke(
         owner,
@@ -1157,7 +1209,11 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     ));
     assert_eq!(
         remove["instructions"][1]["data_hex"],
-        format!("1d{}00", "06".repeat(32))
+        format!(
+            "{}{}00",
+            instruction_discriminator("update_list"),
+            "06".repeat(32)
+        )
     );
     for plan in [&create, &add, &remove] {
         assert_eq!(plan["instructions"][0]["data_hex"], "0290d00300");
@@ -1190,10 +1246,8 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     );
     {
         let mut d = data.lock().unwrap();
-        d[76..80].copy_from_slice(&2u32.to_le_bytes());
-        d[112..144].copy_from_slice(key(7).as_ref());
-        d[144..176].copy_from_slice(key(7).as_ref());
-        d[176..208].copy_from_slice(key(6).as_ref());
+        d[84..88].copy_from_slice(&2u32.to_le_bytes());
+        d[120..152].copy_from_slice(key(7).as_ref());
     }
     assert!(
         !invoke(
@@ -1212,11 +1266,14 @@ fn provider_list_commands_plan_exact_membership_and_enforce_owner_capacity_and_e
     );
     {
         let mut d = data.lock().unwrap();
-        d[76..80].copy_from_slice(&0u32.to_le_bytes());
-        d[80..].fill(0);
+        d[84..88].copy_from_slice(&0u32.to_le_bytes());
+        d[88..].fill(0);
     }
     let close = result(invoke(owner, &["list", "close", "--list", &address]));
-    assert_eq!(close["instructions"][0]["opcode"], 30);
+    assert_eq!(
+        close["instructions"][0]["discriminator"],
+        instruction_discriminator("close_list")
+    );
     assert_eq!(
         close["instructions"][0]["accounts"]
             .as_array()
@@ -1235,7 +1292,8 @@ fn group_profile_commands_create_inspect_update_and_bind_authority_without_signi
     let owner = key(5);
     let (metadata_address, bump) = address::list_metadata(&key(1), &list);
     let mut data = vec![0; fossa_sdk::instruction::list_size(2).unwrap()];
-    data[..8].copy_from_slice(b"LIST0V30");
+    data[..8]
+        .copy_from_slice(<fossa_sdk::accounts::ProviderList as fossa_sdk::accounts::Decode>::MAGIC);
     data[8..40].copy_from_slice(key(2).as_ref());
     data[40..72].copy_from_slice(owner.as_ref());
     data[72..76].copy_from_slice(&2u32.to_le_bytes());
@@ -1267,9 +1325,25 @@ fn group_profile_commands_create_inspect_update_and_bind_authority_without_signi
     let address = list.to_string();
     let create = result(invoke(
         owner,
-        &["list", "create", "--capacity", "2", "--metadata-file", file],
+        &[
+            "list",
+            "create",
+            "--fee-bps",
+            "100",
+            "--protocol-share-bps",
+            "10000",
+            "--maximum-payment",
+            "1",
+            "--capacity",
+            "2",
+            "--metadata-file",
+            file,
+        ],
     ));
-    assert_eq!(create["instructions"][3]["opcode"], 33);
+    assert_eq!(
+        create["instructions"][2]["discriminator"],
+        instruction_discriminator("initialize_list_metadata")
+    );
     assert_eq!(
         create["details"]["metadata"]["document"]["name"],
         "Example Group"
@@ -1283,18 +1357,22 @@ fn group_profile_commands_create_inspect_update_and_bind_authority_without_signi
         file,
     ];
     let first = result(invoke(owner, &update));
-    assert_eq!(first["instructions"][0]["opcode"], 33);
+    assert_eq!(
+        first["instructions"][0]["discriminator"],
+        instruction_discriminator("initialize_list_metadata")
+    );
     assert_eq!(
         first["details"]["metadata"]["sha256"],
         fossa_sdk::metadata::sha256_hex(bytes)
     );
     *metadata.lock().unwrap() = raw(address::SYSTEM_PROGRAM, &[]);
     assert_eq!(
-        result(invoke(owner, &update))["instructions"][0]["opcode"],
-        33
+        result(invoke(owner, &update))["instructions"][0]["discriminator"],
+        instruction_discriminator("initialize_list_metadata")
     );
     let mut account = vec![0; LIST_METADATA_LEN];
-    account[..8].copy_from_slice(b"LMETAV30");
+    account[..8]
+        .copy_from_slice(<fossa_sdk::accounts::ListMetadata as fossa_sdk::accounts::Decode>::MAGIC);
     account[8..40].copy_from_slice(key(2).as_ref());
     account[40..72].copy_from_slice(list.as_ref());
     account[72..104].copy_from_slice(owner.as_ref());
@@ -1311,8 +1389,8 @@ fn group_profile_commands_create_inspect_update_and_bind_authority_without_signi
         std::str::from_utf8(uri).unwrap()
     );
     assert_eq!(
-        result(invoke(owner, &update))["instructions"][0]["opcode"],
-        34
+        result(invoke(owner, &update))["instructions"][0]["discriminator"],
+        instruction_discriminator("update_list_metadata")
     );
     assert!(!invoke(key(9), &update).status.success());
     account[72..104].copy_from_slice(key(9).as_ref());
@@ -1376,8 +1454,8 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
     let id = fossa_sdk::address::model_id("example/model");
     let (model, bump) = fossa_sdk::address::model(&key(1), &key(2), &id);
     let raw = |data: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]});
-    let mut b = vec![0; 368];
-    b[..8].copy_from_slice(b"BOOK0V20");
+    let mut b = vec![0; 472];
+    b[..8].copy_from_slice(<fossa_sdk::accounts::Booking as fossa_sdk::accounts::Decode>::MAGIC);
     b[8..40].copy_from_slice(owner.as_ref());
     b[40..72].copy_from_slice(provider.as_ref());
     b[72..104].copy_from_slice(key(2).as_ref());
@@ -1391,14 +1469,14 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
     b[224..256].copy_from_slice(model.as_ref());
     b[288..320].copy_from_slice(key(13).as_ref());
     b[358] = 1;
-    let mut u = vec![0; 120];
-    u[..8].copy_from_slice(b"USER0V20");
+    let mut u = vec![0; 128];
+    u[..8].copy_from_slice(<fossa_sdk::accounts::User as fossa_sdk::accounts::Decode>::MAGIC);
     u[8..40].copy_from_slice(owner.as_ref());
     u[40..72].copy_from_slice(key(2).as_ref());
     u[80..112].copy_from_slice(key(14).as_ref());
-    u[112] = fossa_sdk::address::vault(&key(1), &user).1;
-    let mut m = vec![0; 144];
-    m[..8].copy_from_slice(b"MODELV20");
+    u[120] = fossa_sdk::address::vault(&key(1), &user).1;
+    let mut m = vec![0; 176];
+    m[..8].copy_from_slice(<fossa_sdk::accounts::Model as fossa_sdk::accounts::Decode>::MAGIC);
     m[8..40].copy_from_slice(key(2).as_ref());
     m[40..72].copy_from_slice(&id);
     m[72..104].copy_from_slice(key(15).as_ref());
@@ -1435,11 +1513,11 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
     let ix = &plan["instructions"][0];
     assert_eq!(ix["accounts"].as_array().unwrap().len(), 11);
     let expected = [
-        vec![7],
+        fossa_sdk::instruction::discriminator("claim_booking").to_vec(),
         3u32.to_le_bytes().to_vec(),
         2u32.to_le_bytes().to_vec(),
         1u32.to_le_bytes().to_vec(),
-        7u64.to_le_bytes().to_vec(),
+        vec![1],
         fossa_sdk::receipt::Receipt {
             owner,
             user,
@@ -1475,8 +1553,8 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         let wallet = key(5);
         let id = fossa_sdk::address::model_id("example/model");
         let (model, bump) = fossa_sdk::address::model(&key(1), &key(2), &id);
-        let mut m = vec![0; 144];
-        m[..8].copy_from_slice(b"MODELV20");
+        let mut m = vec![0; 176];
+        m[..8].copy_from_slice(<fossa_sdk::accounts::Model as fossa_sdk::accounts::Decode>::MAGIC);
         for (at, value) in [(8, key(2)), (72, key(6)), (104, key(7))] {
             m[at..at + 32].copy_from_slice(value.as_ref());
         }
@@ -1485,7 +1563,16 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         m[140] = bump;
         let mut t = vec![0; 48 + 4 * 120];
         let mut c = vec![0; 48 + 4 * 32];
-        for (bytes, magic) in [(&mut t, b"TERMSV20"), (&mut c, b"CAPACV20")] {
+        for (bytes, magic) in [
+            (
+                &mut t,
+                <fossa_sdk::accounts::TermsBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+            (
+                &mut c,
+                <fossa_sdk::accounts::CapacityBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+        ] {
             bytes[..8].copy_from_slice(magic);
             bytes[8..40].copy_from_slice(model.as_ref());
             bytes[40..44].copy_from_slice(&4u32.to_le_bytes());
@@ -1543,11 +1630,198 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         );
         let instructions = plan["instructions"].as_array().unwrap();
         assert_eq!(instructions.len(), 1);
-        assert_eq!(instructions[0]["opcode"], 32);
+        assert_eq!(
+            instructions[0]["discriminator"],
+            instruction_discriminator("grow_books")
+        );
         let accounts = instructions[0]["accounts"].as_array().unwrap();
-        assert_eq!(accounts.len(), 6);
+        assert_eq!(accounts.len(), 5);
         assert_eq!(accounts[4]["address"], wallet.to_string());
         assert_eq!(accounts[4]["signer"], true);
         assert!(!dir.path().join("transactions").exists());
+    }
+}
+
+fn instruction_discriminator(name: &str) -> String {
+    fossa_sdk::instruction::discriminator(name)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn council_policy_patch_preserves_gate_and_rotation_plans_both_signers() {
+    let dir = tempfile::tempdir().unwrap();
+    let council = key(5);
+    let mock = mock(move |_, req| {
+        assert_eq!(req["method"], "getAccountInfo");
+        assert_eq!(req["params"][0], key(2).to_string());
+        let mut state = market_account(council);
+        let mut bytes = STANDARD.decode(state["data"][0].as_str().unwrap()).unwrap();
+        bytes[176] = 0;
+        state["data"][0] = STANDARD.encode(bytes).into();
+        rpc(req, json!({"context":{"slot":9},"value":state}))
+    });
+    let invoke = |wallet, args: &[&str]| {
+        let mut command = cmd(dir.path());
+        protocol_args(&mut command, &mock.url, wallet);
+        command.args(args).output().unwrap()
+    };
+    let bank = key(6).to_string();
+    let plan = result(invoke(
+        council,
+        &["council", "configure-fees", "--bank", &bank],
+    ));
+    assert_eq!(plan["details"]["next"]["creation_enabled"], false);
+    assert_eq!(plan["details"]["next"]["creation_net_price"], 1);
+    assert_eq!(plan["details"]["next"]["creation_mint"], key(4).to_string());
+    assert_eq!(
+        plan["instructions"][0]["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        !invoke(key(9), &["council", "configure-fees", "--bank", &bank])
+            .status
+            .success()
+    );
+    let next = key(7).to_string();
+    let rotate = result(invoke(council, &["council", "rotate", "--next", &next]));
+    let accounts = rotate["instructions"][0]["accounts"].as_array().unwrap();
+    assert_eq!(accounts[1]["address"], council.to_string());
+    assert_eq!(accounts[2]["address"], next);
+    assert_eq!(accounts[1]["signer"], true);
+    assert_eq!(accounts[2]["signer"], true);
+    assert!(!dir.path().join("transactions").exists());
+}
+
+#[test]
+fn list_fee_planning_enforces_authority_and_permitted_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = key(5);
+    let list = key(30);
+    let mut bytes = vec![0; fossa_sdk::instruction::list_size(1).unwrap()];
+    bytes[..8]
+        .copy_from_slice(<fossa_sdk::accounts::ProviderList as fossa_sdk::accounts::Decode>::MAGIC);
+    bytes[8..40].copy_from_slice(key(2).as_ref());
+    bytes[40..72].copy_from_slice(authority.as_ref());
+    bytes[72..76].copy_from_slice(&1u32.to_le_bytes());
+    bytes[76..78].copy_from_slice(&100u16.to_le_bytes());
+    bytes[78..80].copy_from_slice(&10_000u16.to_le_bytes());
+    let mock = mock(move |_, req| {
+        assert_eq!(req["method"], "getAccountInfo");
+        let state = if req["params"][0] == key(2).to_string() {
+            market_account(key(99))
+        } else {
+            assert_eq!(req["params"][0], list.to_string());
+            json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(&bytes),"base64"]})
+        };
+        rpc(req, json!({"context":{"slot":9},"value":state}))
+    });
+    let invoke = |wallet, fee: &str| {
+        let mut command = cmd(dir.path());
+        protocol_args(&mut command, &mock.url, wallet);
+        command
+            .args([
+                "list",
+                "configure-fees",
+                "--list",
+                &list.to_string(),
+                "--fee-bps",
+                fee,
+                "--protocol-share-bps",
+                "5000",
+            ])
+            .output()
+            .unwrap()
+    };
+    let plan = result(invoke(authority, "10"));
+    assert_eq!(plan["details"]["previous"]["fee_bps"], 100);
+    assert_eq!(plan["details"]["next"]["fee_bps"], 10);
+    assert_eq!(plan["details"]["next"]["protocol_share"], 5000);
+    assert_eq!(
+        plan["instructions"][0]["discriminator"],
+        instruction_discriminator("configure_list_fees")
+    );
+    for (wallet, fee) in [(authority, "9"), (authority, "301"), (key(9), "10")] {
+        assert!(!invoke(wallet, fee).status.success());
+    }
+    assert!(!dir.path().join("transactions").exists());
+}
+
+#[test]
+fn model_assignment_validates_group_market_and_clear_uses_anchor_none() {
+    use fossa_sdk::{
+        accounts::{Decode, Model, ModelGroup},
+        address,
+    };
+    for foreign in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let council = key(5);
+        let id = address::model_id("example/model");
+        let (model, bump) = address::model(&key(1), &key(2), &id);
+        let group_market = if foreign { key(9) } else { key(2) };
+        let (group, group_bump) = address::model_group(&key(1), &group_market, &[4; 32]);
+        let mut model_bytes = vec![0; fossa_sdk::accounts::MODEL_LEN];
+        model_bytes[..8].copy_from_slice(Model::MAGIC);
+        model_bytes[8..40].copy_from_slice(key(2).as_ref());
+        model_bytes[40..72].copy_from_slice(&id);
+        model_bytes[72..104].copy_from_slice(key(6).as_ref());
+        model_bytes[104..136].copy_from_slice(key(7).as_ref());
+        model_bytes[136..140].copy_from_slice(&4u32.to_le_bytes());
+        model_bytes[140] = bump;
+        let mut group_bytes = vec![0; fossa_sdk::accounts::MODEL_GROUP_LEN];
+        group_bytes[..8].copy_from_slice(ModelGroup::MAGIC);
+        group_bytes[8..40].copy_from_slice(group_market.as_ref());
+        group_bytes[40..72].copy_from_slice(&[4; 32]);
+        group_bytes[72..104].copy_from_slice(key(8).as_ref());
+        group_bytes[104..136].copy_from_slice(address::reserve_mint(&key(1), &group).0.as_ref());
+        group_bytes[136] = 1;
+        group_bytes[137] = group_bump;
+        let mock = mock(move |_, req| {
+            assert_eq!(req["method"], "getAccountInfo");
+            let at = req["params"][0].as_str().unwrap();
+            let raw = |bytes: &[u8]| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
+            let state = if at == key(2).to_string() {
+                market_account(council)
+            } else if at == model.to_string() {
+                raw(&model_bytes)
+            } else {
+                assert_eq!(at, group.to_string());
+                raw(&group_bytes)
+            };
+            rpc(req, json!({"context":{"slot":9},"value":state}))
+        });
+        let invoke = |args: &[&str]| {
+            let mut command = cmd(dir.path());
+            protocol_args(&mut command, &mock.url, council);
+            command.args(args).output().unwrap()
+        };
+        let output = invoke(&[
+            "model",
+            "assign-group",
+            "--model",
+            "example/model",
+            "--group",
+            &group.to_string(),
+        ]);
+        if foreign {
+            assert!(!output.status.success());
+        } else {
+            assert_eq!(result(output)["details"]["group"], group.to_string());
+        }
+        let clear = result(invoke(&[
+            "model",
+            "clear-group",
+            "--model",
+            "example/model",
+        ]));
+        assert!(clear["details"]["group"].is_null());
+        assert_eq!(
+            clear["instructions"][0]["accounts"][3]["address"],
+            key(1).to_string()
+        );
     }
 }

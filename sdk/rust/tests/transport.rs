@@ -471,8 +471,8 @@ async fn group_metadata_and_svg_uploads_sign_exact_bytes_and_reject_unsafe_icons
 async fn onboarding_registers_without_admission_approval() {
     let p = protocol();
     let admin = key(20);
-    let mut data = vec![0; 72];
-    data[..8].copy_from_slice(b"FOSSAV20");
+    let mut data = vec![0; 248];
+    data[..8].copy_from_slice(<fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC);
     data[8..40].copy_from_slice(admin.as_ref());
     data[40..72].copy_from_slice(p.mint.as_ref());
     let mock=spawn_mock(move |_,_,body|{let q:Value=serde_json::from_slice(body).unwrap();assert_eq!(q["method"],"getAccountInfo");rpc_response(body,json!({"context":{"slot":1},"value":if q["params"][0]==p.market.to_string(){json!({"owner":p.program.to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(&data),"base64"]})}else{Value::Null}}))}).await;
@@ -487,17 +487,22 @@ async fn onboarding_registers_without_admission_approval() {
         .await
         .unwrap();
     assert_eq!(plan.steps.len(), 1);
-    assert_eq!(plan.steps[0].instructions[0].data[0], 19);
+    assert!(
+        plan.steps[0].instructions[0]
+            .data
+            .starts_with(&instruction::discriminator("initialize_provider"))
+    );
     assert!(plan.blockers.is_empty());
 }
 
 #[tokio::test]
-async fn onboarding_reuses_book_rents_and_creates_permissionless_models() {
+async fn onboarding_uses_anchor_initialization_without_external_book_allocations() {
     let p = protocol();
     let provider = key(10);
-    let mut market = b"FOSSAV20".to_vec();
+    let mut market = <fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC.to_vec();
     market.extend(provider.as_ref());
     market.extend(p.mint.as_ref());
+    market.resize(MARKET_LEN, 0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
     let mock = spawn_mock(move |_, _, body| {
@@ -541,13 +546,13 @@ async fn onboarding_reuses_book_rents_and_creates_permissionless_models() {
     assert!(plan.blockers.is_empty());
     assert_eq!(plan.steps.len(), 7);
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 7);
+    assert_eq!(calls.len(), 5);
     assert_eq!(
         calls
             .iter()
             .filter(|(method, _)| method == "getMinimumBalanceForRentExemption")
             .count(),
-        2
+        0
     );
     let source = address::associated_token(&p.mint, &provider).to_string();
     assert_eq!(
@@ -568,9 +573,10 @@ fn inference_v1_v2_headers_verify_exact_body_owner_booking_and_deadline() {
         owner: p.program,
         lamports: 1,
         executable: false,
-        data: vec![0; 368],
+        data: vec![0; 472],
     };
-    raw.data[..8].copy_from_slice(b"BOOK0V20");
+    raw.data[..8]
+        .copy_from_slice(<fossa_sdk::accounts::Booking as fossa_sdk::accounts::Decode>::MAGIC);
     raw.data[8..40].copy_from_slice(signer.pubkey().as_ref());
     raw.data[40..72].copy_from_slice(key(9).as_ref());
     raw.data[72..104].copy_from_slice(p.market.as_ref());
@@ -799,8 +805,8 @@ async fn metadata_fetch_rejects_private_destinations_and_non_https_before_http()
 async fn real_json_wire_uses_base58_keys_for_config_accounts_and_discovery() {
     let p = protocol();
     let owner = key(20);
-    let mut data = vec![0; 72];
-    data[..8].copy_from_slice(b"FOSSAV20");
+    let mut data = vec![0; 248];
+    data[..8].copy_from_slice(<fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC);
     data[8..40].copy_from_slice(owner.as_ref());
     data[40..72].copy_from_slice(p.mint.as_ref());
     let config:PublicConfig=serde_json::from_value(json!({"programId":p.program.to_string(),"market":p.market.to_string(),"providerList":key(30).to_string(),"usdcMint":p.mint.to_string(),"providerApi":"https://api.example.test","providerRpc":"https://api.example.test/v1/providers/rpc"})).unwrap();
@@ -812,9 +818,9 @@ async fn real_json_wire_uses_base58_keys_for_config_accounts_and_discovery() {
     let mock=spawn_mock(move |_,_,body| {let q:Value=serde_json::from_slice(body).unwrap();let account=json!({"owner":p.program.to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(&data),"base64"]});rpc_response(body,if q["method"]=="getProgramAccounts" {assert_eq!(q["params"][1]["encoding"],"base64");json!([{"pubkey":p.market.to_string(),"account":account}])}else{json!({"context":{"slot":1},"value":account})})}).await;
     let rpc = RpcClient::new(&mock.url).unwrap();
     let market = rpc.validate_market(&p).await.unwrap();
-    assert_eq!(market.admin, owner);
+    assert_eq!(market.council, owner);
     assert_eq!(
-        serde_json::to_value(&market).unwrap()["admin"],
+        serde_json::to_value(&market).unwrap()["council"],
         owner.to_string()
     );
     assert_eq!(
@@ -1089,11 +1095,13 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
             active: true,
             capacity: 1,
         };
-        let mut market = b"FOSSAV20".to_vec();
+        let mut market =
+            <fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC.to_vec();
         market.extend(key(20).as_ref());
         market.extend(p.mint.as_ref());
+        market.resize(MARKET_LEN, 0);
         let mut m = vec![0; MODEL_LEN];
-        m[..8].copy_from_slice(b"MODELV20");
+        m[..8].copy_from_slice(<fossa_sdk::accounts::Model as fossa_sdk::accounts::Decode>::MAGIC);
         for (at, value) in [(8, p.market), (72, key(30)), (104, key(31))] {
             m[at..at + 32].copy_from_slice(value.as_ref());
         }
@@ -1101,7 +1109,9 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
         m[136..140].copy_from_slice(&limit.to_le_bytes());
         m[140] = bump;
         let mut md = vec![0; MODEL_METADATA_LEN];
-        md[..8].copy_from_slice(b"MMETAV20");
+        md[..8].copy_from_slice(
+            <fossa_sdk::accounts::ModelMetadata as fossa_sdk::accounts::Decode>::MAGIC,
+        );
         for (at, value) in [(8, p.market), (40, model), (72, key(20))] {
             md[at..at + 32].copy_from_slice(value.as_ref());
         }
@@ -1112,7 +1122,16 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
         let [ts, cs] = instruction::book_sizes(limit).unwrap();
         let mut t = vec![0; ts];
         let mut c = vec![0; cs];
-        for (bytes, magic) in [(&mut t, b"TERMSV20"), (&mut c, b"CAPACV20")] {
+        for (bytes, magic) in [
+            (
+                &mut t,
+                <fossa_sdk::accounts::TermsBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+            (
+                &mut c,
+                <fossa_sdk::accounts::CapacityBook as fossa_sdk::accounts::Decode>::MAGIC,
+            ),
+        ] {
             bytes[..8].copy_from_slice(magic);
             bytes[8..40].copy_from_slice(model.as_ref());
             bytes[40..44].copy_from_slice(&limit.to_le_bytes());
@@ -1174,7 +1193,8 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
                     instruction::ModelKeys {
                         model,
                         terms: key(30),
-                        capacity: key(31)
+                        capacity: key(31),
+                        group: Pubkey::default(),
                     },
                     key(11),
                     5
@@ -1182,9 +1202,15 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
                 .unwrap()
             );
         }
-        assert_eq!(instructions.last().unwrap().data[0], 2);
+        assert!(
+            instructions
+                .last()
+                .unwrap()
+                .data
+                .starts_with(&instruction::discriminator("register_offer"))
+        );
         assert_eq!(
-            &instructions.last().unwrap().data[1..5],
+            &instructions.last().unwrap().data[8..12],
             &count.to_le_bytes()
         );
         PreparedTransaction::new(instructions, key(11), Hash::default(), 100, 0).unwrap();

@@ -1,13 +1,16 @@
 pub mod accounts;
 pub mod address;
 pub mod amount;
+pub mod dex;
 pub mod hosted;
 pub mod inference;
 pub mod instruction;
 pub mod metadata;
 pub mod onboarding;
 pub mod receipt;
+pub mod reserve;
 pub mod rpc;
+pub mod token;
 pub mod transaction;
 pub use fossa_metadata as schema;
 
