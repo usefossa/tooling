@@ -935,11 +935,11 @@ fn no_color_overrides_forced_help_colors_and_never_alters_json_data() {
     assert_eq!(value["api_url"], "https://api.fossa.ag");
     assert_eq!(
         value["program_id"],
-        "F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT"
+        "routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41"
     );
     assert_eq!(
         value["market"],
-        "8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som"
+        "HwZJcXPHhQFfGYivpVFDrn65EYoksMt7zZLeZWgyYAv"
     );
     assert_eq!(
         value["usdc_mint"],
@@ -1011,7 +1011,7 @@ fn default_transport_respects_file_env_flags_and_explicit_disable() {
     assert_eq!(changed["market"], key(9).to_string());
     assert_eq!(
         changed["program_id"],
-        "F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT"
+        "routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41"
     );
 }
 #[test]
@@ -1024,7 +1024,7 @@ fn pinned_protocol_needs_no_public_config_lookup_and_hosted_rpc_is_default() {
         serde_json::to_vec(&signer.to_bytes().to_vec()).unwrap(),
     )
     .unwrap();
-    let market = "8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som";
+    let market = "HwZJcXPHhQFfGYivpVFDrn65EYoksMt7zZLeZWgyYAv";
     let mut data = <fossa_sdk::accounts::Market as fossa_sdk::accounts::Decode>::MAGIC.to_vec();
     data.extend(key(4).as_ref());
     data.extend(
@@ -1034,7 +1034,7 @@ fn pinned_protocol_needs_no_public_config_lookup_and_hosted_rpc_is_default() {
             .as_ref(),
     );
     data.resize(fossa_sdk::accounts::MARKET_LEN, 0);
-    let account = json!({"owner":"F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT","lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]});
+    let account = json!({"owner":"routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41","lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]});
     let paths = Arc::new(Mutex::new(Vec::new()));
     let seen = paths.clone();
     let mock = mock(move |path, req| {

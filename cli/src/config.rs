@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 pub const API_URL: &str = "https://api.fossa.ag";
 pub const PROGRAM_ID: Pubkey =
-    Pubkey::from_str_const("F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT");
-pub const MARKET: Pubkey = Pubkey::from_str_const("8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som");
+    Pubkey::from_str_const("routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41");
+pub const MARKET: Pubkey = Pubkey::from_str_const("HwZJcXPHhQFfGYivpVFDrn65EYoksMt7zZLeZWgyYAv");
 pub const PROVIDER_LIST: Pubkey =
-    Pubkey::from_str_const("CCgnXjgpVfNcFrZpFUYaepySTSfHxuqxPKej5D94zhc6");
+    Pubkey::from_str_const("6jgtRvRwspmxJXC2hoqUKRgAHeb2pFMiTD7n5p33hcFB");
 pub const USDC_MINT: Pubkey =
     Pubkey::from_str_const("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
