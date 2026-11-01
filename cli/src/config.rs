@@ -68,7 +68,7 @@ pub struct Provider {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
-    pub checkpoint: String,
+    pub checkpoint: Option<String>,
     pub input_modalities: String,
     pub output_modalities: String,
     pub context_tokens: u32,

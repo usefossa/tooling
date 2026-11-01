@@ -1064,7 +1064,7 @@ async fn onboard(rt: &Runtime) -> Result<Value> {
             None => hosted_reference(&rt.config, &document)?,
         };
         let terms = OfferTerms {
-            checkpoint: crate::args::parse_checkpoint(&model.checkpoint).map_err(Error::Input)?,
+            checkpoint: model_checkpoint(model, &document)?,
             input_modalities: crate::args::parse_modalities(&model.input_modalities)
                 .map_err(Error::Input)?,
             output_modalities: crate::args::parse_modalities(&model.output_modalities)
@@ -1213,6 +1213,20 @@ async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
     ];
     rt.transact("create booking",ix,&[key],json!({"booking":booking.to_string(),"user":args.user.to_string(),"candidate_slot":selected.slot,"reserve_atomic":selected.reserve.to_string(),"selection":"on-chain selection uses execution-time state"})).await
 }
+fn model_checkpoint(model: &crate::config::Model, document: &Document) -> Result<[u8; 32]> {
+    let checkpoints = document.value()["checkpoints"].as_array();
+    let earliest = checkpoints.and_then(|items| {
+        items
+            .iter()
+            .find(|checkpoint| checkpoint["ordered"] != false)
+            .or_else(|| items.first())
+            .and_then(|checkpoint| checkpoint["id"].as_str())
+    });
+    let checkpoint = model.checkpoint.as_deref().or(earliest).ok_or_else(|| {
+        Error::Input("Model metadata must publish at least one checkpoint identity.".into())
+    })?;
+    crate::args::parse_checkpoint(checkpoint).map_err(Error::Input)
+}
 fn validate_onboard(config: &Config) -> Result<()> {
     let provider = &config.file.provider;
     let path = provider
@@ -1223,10 +1237,10 @@ fn validate_onboard(config: &Config) -> Result<()> {
     validate_uri(provider.metadata_uri.as_deref())?;
     instruction::book_sizes(provider.model_book_limit.unwrap_or(16))?;
     for model in &provider.models {
-        model_document(&model.id, &config.base.join(&model.metadata_file))?;
+        let document = model_document(&model.id, &config.base.join(&model.metadata_file))?;
         validate_uri(model.metadata_uri.as_deref())?;
         OfferTerms {
-            checkpoint: crate::args::parse_checkpoint(&model.checkpoint).map_err(Error::Input)?,
+            checkpoint: model_checkpoint(model, &document)?,
             input_modalities: crate::args::parse_modalities(&model.input_modalities)
                 .map_err(Error::Input)?,
             output_modalities: crate::args::parse_modalities(&model.output_modalities)
@@ -1258,6 +1272,36 @@ fn validate_onboard(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_checkpoint_defaults_to_earliest_ordered_identity() {
+        let source = include_str!("../config.example.toml")
+            .replace("checkpoint = \"example/model@2026-10-17\"\n", "");
+        let mut config: crate::config::FileConfig = toml::from_str(&source).unwrap();
+        let model = &mut config.provider.models[0];
+        assert!(model.checkpoint.is_none());
+        let mut value = json!({"id":model.id,"name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[{"id":"example/model","name":"Latest","ordered":false},{"id":"example/model@0905","name":"0905"},{"id":"example/model@1017","name":"1017"}]});
+        let document = Document::model(&model.id, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            model_checkpoint(model, &document).unwrap(),
+            address::model_id("example/model@0905")
+        );
+        model.checkpoint = Some("example/model@1017".into());
+        assert_eq!(
+            model_checkpoint(model, &document).unwrap(),
+            address::model_id("example/model@1017")
+        );
+        model.checkpoint = None;
+        value["checkpoints"].as_array_mut().unwrap().truncate(1);
+        let document = Document::model(&model.id, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            model_checkpoint(model, &document).unwrap(),
+            address::model_id("example/model")
+        );
+        value.as_object_mut().unwrap().remove("checkpoints");
+        let document = Document::model(&model.id, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(model_checkpoint(model, &document).is_err());
+    }
 
     #[test]
     fn group_profile_patch_preserves_fields_and_explicitly_clears_assets() {
