@@ -47,6 +47,12 @@ fn builders_match_anchor_generated_instruction_data_and_account_metas() {
         fee_destinations: None,
     };
     let terms = OfferTerms {
+        checkpoint: [7; 32],
+        input_modalities: 1,
+        output_modalities: 1,
+        context_window: 1_000_000,
+        max_input: 1_000_000,
+        max_output: 1_000_000,
         rates: Rates {
             input: 1000,
             cached: 100,
@@ -60,6 +66,11 @@ fn builders_match_anchor_generated_instruction_data_and_account_metas() {
     let document = DocumentRef::new([29; 32], "https://fixture.invalid/model.json").unwrap();
     let generation = fixture["generation"].as_str().unwrap().parse().unwrap();
     let request = BookRequest {
+        min_context: 0,
+        limits_configured: false,
+        checkpoint: [7; 32],
+        input_modalities: 1,
+        output_modalities: 1,
         model_id: key("model_id").to_bytes(),
         provider_list: key("list"),
         rate_caps: Rates {

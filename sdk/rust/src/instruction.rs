@@ -98,6 +98,11 @@ pub enum BookingMode {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookRequest {
+    pub min_context: u32,
+    pub limits_configured: bool,
+    pub checkpoint: [u8; 32],
+    pub input_modalities: u8,
+    pub output_modalities: u8,
     pub model_id: [u8; 32],
     #[serde(with = "crate::serde_pubkey")]
     pub provider_list: Pubkey,
@@ -116,7 +121,12 @@ pub struct BookRequest {
 impl BookRequest {
     pub fn validate(&self) -> Result<()> {
         ensure(
-            self.max_input > 0
+            (self.min_context == 0 || self.limits_configured)
+                && self.checkpoint != [0; 32]
+                && accounts::valid_modalities(self.input_modalities)
+                && accounts::valid_modalities(self.output_modalities)
+                && self.max_input.checked_add(self.max_output).is_some()
+                && self.max_input > 0
                 && self.max_output > 0
                 && self.estimated_input <= self.max_input
                 && self.estimated_output <= self.max_output
@@ -127,7 +137,7 @@ impl BookRequest {
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
-        let mut p = Vec::with_capacity(115);
+        let mut p = Vec::with_capacity(146);
         p.extend(self.model_id);
         self.rate_caps.encode(&mut p);
         p.extend(self.min_speed.to_le_bytes());
@@ -143,6 +153,10 @@ impl BookRequest {
             p.extend(n.to_le_bytes());
         }
         p.extend(self.cache_provider.as_ref());
+        p.extend(self.checkpoint);
+        p.extend([self.input_modalities, self.output_modalities]);
+        p.extend(self.min_context.to_le_bytes());
+        p.push(u8::from(self.limits_configured));
         Ok(p)
     }
     pub fn select(
@@ -168,7 +182,17 @@ impl BookRequest {
         for (slot, (offer, cap)) in terms.entries.iter().zip(&capacity.entries).enumerate() {
             let t = offer.terms;
             let r = t.rates;
-            if !t.active
+            if t.context_window < self.min_context
+                || t.checkpoint != self.checkpoint
+                || t.input_modalities & self.input_modalities != self.input_modalities
+                || t.output_modalities & self.output_modalities != self.output_modalities
+                || self.max_input > t.max_input
+                || self.max_output > t.max_output
+                || self
+                    .max_input
+                    .checked_add(self.max_output)
+                    .is_none_or(|total| total > t.context_window)
+                || !t.active
                 || !list.contains(&offer.provider)
                 || (self.private && !t.private)
                 || u32::from(t.speed_tps) < min_speed
@@ -649,6 +673,7 @@ impl Protocol {
                 w(model.terms),
                 w(model.capacity),
                 ws(payer),
+                r(SYSTEM_PROGRAM),
             ],
         ))
     }

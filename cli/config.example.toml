@@ -36,6 +36,12 @@ model_book_limit = 16
 
 [[provider.models]]
 id = "example/model"
+checkpoint = "example/model@2026-10-17"
+input_modalities = "text"
+output_modalities = "text"
+context_tokens = 131072
+input_bound_tokens = 122880
+output_tokens = 8192
 metadata_file = "model.json"
 # metadata_uri = "https://provider.example.com/immutable/model.json"
 # rates below: micro-usdc per million tokens; 1000000 means $1.00/million.

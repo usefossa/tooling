@@ -512,7 +512,7 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     m[104..136].copy_from_slice(capacity_key.as_ref());
     m[136..140].copy_from_slice(&1u32.to_le_bytes());
     m[140] = bump;
-    let mut t = vec![0; 168];
+    let mut t = vec![0; 180];
     t[..8].copy_from_slice(<fossa_sdk::accounts::TermsBook as fossa_sdk::accounts::Decode>::MAGIC);
     t[8..40].copy_from_slice(model.as_ref());
     t[40..44].copy_from_slice(&1u32.to_le_bytes());
@@ -527,6 +527,11 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     t[158] = 1;
     t[159] = 0;
     t[160] = 1;
+    t[161] = 1;
+    t[162] = 1;
+    t[168..172].copy_from_slice(&1_000_000u32.to_le_bytes());
+    t[172..176].copy_from_slice(&1_000_000u32.to_le_bytes());
+    t[176..180].copy_from_slice(&1_000_000u32.to_le_bytes());
     t[164..168].copy_from_slice(&7u32.to_le_bytes());
     let mut c = vec![0; 80];
     c[..8]
@@ -564,7 +569,7 @@ fn offer_update_plans_keep_all_omitted_chain_terms_and_parse_real_rpc_strings() 
     );
     assert_eq!(
         value["details"]["next"],
-        json!({"rates":{"input":1_000_000,"cached":500_000,"output":3_123_456},"speed_tps":300,"private":true,"active":false,"capacity":7})
+        json!({"checkpoint":vec![9;32],"input_modalities":1,"output_modalities":1,"context_window":1_000_000,"max_input":1_000_000,"max_output":1_000_000,"rates":{"input":1_000_000,"cached":500_000,"output":3_123_456},"speed_tps":300,"private":true,"active":false,"capacity":7})
     );
     assert_eq!(
         value["instructions"][0]["discriminator"],
@@ -597,7 +602,7 @@ fn booking_budget_counts_every_permanent_slot_and_preserves_packet_limit() {
         u[72..80].copy_from_slice(&1_000_000u64.to_le_bytes());
         u[80..112].copy_from_slice(key(11).as_ref());
         u[120] = fossa_sdk::address::vault(&key(1), &user).1;
-        let mut t = vec![0; 48 + count as usize * 120];
+        let mut t = vec![0; 48 + count as usize * 132];
         let mut c = vec![0; 48 + count as usize * 32];
         for (book, magic) in [
             (
@@ -615,16 +620,21 @@ fn booking_budget_counts_every_permanent_slot_and_preserves_packet_limit() {
             book[44..48].copy_from_slice(&count.to_le_bytes());
         }
         for slot in 0..count as usize {
-            let term = &mut t[48 + slot * 120..48 + (slot + 1) * 120];
+            let term = &mut t[48 + slot * 132..48 + (slot + 1) * 132];
             term[..32].copy_from_slice(key(12).as_ref());
             term[32..64].copy_from_slice(key(13).as_ref());
-            term[64..96].copy_from_slice(key(14).as_ref());
+            term[64..96].copy_from_slice(&fossa_sdk::address::model_id("example/model@1017"));
             for offset in [96, 100, 104] {
                 term[offset..offset + 4].copy_from_slice(&1_000_000u32.to_le_bytes());
             }
             term[108..110].copy_from_slice(&1u16.to_le_bytes());
             term[111] = u8::from(slot + 1 == count as usize);
             term[112] = 1;
+            term[113] = 1;
+            term[114] = 1;
+            for at in [120, 124, 128] {
+                term[at..at + 4].copy_from_slice(&1_000_000u32.to_le_bytes());
+            }
             term[116..120].copy_from_slice(&1u32.to_le_bytes());
             c[48 + slot * 32..56 + slot * 32].copy_from_slice(&1_000_000u64.to_le_bytes());
         }
@@ -661,6 +671,8 @@ fn booking_budget_counts_every_permanent_slot_and_preserves_packet_limit() {
                 .args([
                     "booking",
                     "create",
+                    "--checkpoint",
+                    "example/model@1017",
                     "--user",
                     &user.to_string(),
                     "--model",
@@ -1454,7 +1466,7 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
     let id = fossa_sdk::address::model_id("example/model");
     let (model, bump) = fossa_sdk::address::model(&key(1), &key(2), &id);
     let raw = |data: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]});
-    let mut b = vec![0; 472];
+    let mut b = vec![0; 520];
     b[..8].copy_from_slice(<fossa_sdk::accounts::Booking as fossa_sdk::accounts::Decode>::MAGIC);
     b[8..40].copy_from_slice(owner.as_ref());
     b[40..72].copy_from_slice(provider.as_ref());
@@ -1544,10 +1556,10 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
 fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
     for (limit, donated, succeeds) in [
         (5u32, false, true),
-        (89, true, true),
+        (81, true, true),
         (4, false, false),
         (3, false, false),
-        (90, false, false),
+        (82, false, false),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let wallet = key(5);
@@ -1561,7 +1573,7 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         m[40..72].copy_from_slice(&id);
         m[136..140].copy_from_slice(&4u32.to_le_bytes());
         m[140] = bump;
-        let mut t = vec![0; 48 + 4 * 120];
+        let mut t = vec![0; 48 + 4 * 132];
         let mut c = vec![0; 48 + 4 * 32];
         for (bytes, magic) in [
             (
@@ -1580,7 +1592,7 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         let raw = |bytes: Vec<u8>, lamports: u64| json!({"owner":key(1).to_string(),"lamports":lamports,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
         let (m, t, c) = (
             raw(m, 1),
-            raw(t, if donated { 200_000 } else { 5280 }),
+            raw(t, if donated { 200_000 } else { 5760 }),
             raw(c, 1760),
         );
         let mock = mock(move |_, q| {
@@ -1613,7 +1625,7 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
             .unwrap();
         if !succeeds {
             assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("1 to 85"));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("1 to 77"));
             continue;
         }
         let plan = result(output);
@@ -1622,7 +1634,7 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
         let rent = if donated {
             (limit - 4) * 32 * 10
         } else {
-            (limit - 4) * 152 * 10
+            (limit - 4) * 164 * 10
         };
         assert_eq!(
             plan["details"]["additional_rent_lamports"],
@@ -1635,7 +1647,11 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
             instruction_discriminator("grow_books")
         );
         let accounts = instructions[0]["accounts"].as_array().unwrap();
-        assert_eq!(accounts.len(), 5);
+        assert_eq!(accounts.len(), 6);
+        assert_eq!(
+            accounts[5]["address"],
+            fossa_sdk::address::SYSTEM_PROGRAM.to_string()
+        );
         assert_eq!(accounts[4]["address"], wallet.to_string());
         assert_eq!(accounts[4]["signer"], true);
         assert!(!dir.path().join("transactions").exists());

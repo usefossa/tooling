@@ -359,10 +359,10 @@ async fn model(rt: &Runtime, command: ModelCommand) -> Result<Value> {
                 .await?;
             if model.market != rt.protocol.market
                 || limit <= model.limit
-                || limit - model.limit > 85
+                || limit - model.limit > 77
             {
                 return Err(Error::Input(
-                    "new limit must add 1 to 85 slots in this market".into(),
+                    "new limit must add 1 to 77 slots in this market".into(),
                 ));
             }
             let books = rt
@@ -424,6 +424,24 @@ async fn model(rt: &Runtime, command: ModelCommand) -> Result<Value> {
     }
 }
 pub fn patch_terms(mut terms: OfferTerms, patch: &OfferPatch) -> Result<OfferTerms> {
+    if let Some(value) = patch.checkpoint {
+        terms.checkpoint = value;
+    }
+    if let Some(value) = patch.input_modalities {
+        terms.input_modalities = value;
+    }
+    if let Some(value) = patch.output_modalities {
+        terms.output_modalities = value;
+    }
+    if let Some(value) = patch.context_tokens {
+        terms.context_window = value;
+    }
+    if let Some(value) = patch.input_bound_tokens {
+        terms.max_input = value;
+    }
+    if let Some(value) = patch.output_tokens {
+        terms.max_output = value;
+    }
     if let Some(n) = patch.input_price {
         terms.rates.input = n;
     }
@@ -1046,6 +1064,14 @@ async fn onboard(rt: &Runtime) -> Result<Value> {
             None => hosted_reference(&rt.config, &document)?,
         };
         let terms = OfferTerms {
+            checkpoint: crate::args::parse_checkpoint(&model.checkpoint).map_err(Error::Input)?,
+            input_modalities: crate::args::parse_modalities(&model.input_modalities)
+                .map_err(Error::Input)?,
+            output_modalities: crate::args::parse_modalities(&model.output_modalities)
+                .map_err(Error::Input)?,
+            context_window: model.context_tokens,
+            max_input: model.input_bound_tokens,
+            max_output: model.output_tokens,
             rates: Rates {
                 input: model.input_rate,
                 cached: model.cached_rate,
@@ -1110,6 +1136,11 @@ async fn onboard(rt: &Runtime) -> Result<Value> {
 
 fn book_request(args: &BookArgs, default_list: Pubkey) -> instruction::BookRequest {
     instruction::BookRequest {
+        min_context: args.min_context,
+        limits_configured: args.limits_configured || args.min_context > 0,
+        checkpoint: args.checkpoint,
+        input_modalities: args.input_modalities,
+        output_modalities: args.output_modalities,
         model_id: address::model_id(&args.model.model),
         provider_list: args.list.unwrap_or(default_list),
         rate_caps: Rates {
@@ -1195,6 +1226,14 @@ fn validate_onboard(config: &Config) -> Result<()> {
         model_document(&model.id, &config.base.join(&model.metadata_file))?;
         validate_uri(model.metadata_uri.as_deref())?;
         OfferTerms {
+            checkpoint: crate::args::parse_checkpoint(&model.checkpoint).map_err(Error::Input)?,
+            input_modalities: crate::args::parse_modalities(&model.input_modalities)
+                .map_err(Error::Input)?,
+            output_modalities: crate::args::parse_modalities(&model.output_modalities)
+                .map_err(Error::Input)?,
+            context_window: model.context_tokens,
+            max_input: model.input_bound_tokens,
+            max_output: model.output_tokens,
             rates: Rates {
                 input: model.input_rate,
                 cached: model.cached_rate,
@@ -1253,6 +1292,12 @@ mod tests {
     #[test]
     fn price_patch_preserves_capacity_privacy_activation_speed_and_other_rates() {
         let old = OfferTerms {
+            checkpoint: [7; 32],
+            input_modalities: 1,
+            output_modalities: 1,
+            context_window: 1_000_000,
+            max_input: 1_000_000,
+            max_output: 1_000_000,
             rates: Rates {
                 input: 1_000_000,
                 cached: 500_000,
@@ -1274,6 +1319,12 @@ mod tests {
         assert_eq!(
             next,
             OfferTerms {
+                checkpoint: [7; 32],
+                input_modalities: 1,
+                output_modalities: 1,
+                context_window: 1_000_000,
+                max_input: 1_000_000,
+                max_output: 1_000_000,
                 rates: Rates {
                     output: 3_123_456,
                     ..old.rates

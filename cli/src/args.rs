@@ -180,7 +180,7 @@ pub enum ModelCommand {
     /// Council sends future bookings' protocol fees to treasury
     #[command(after_help = DOCS)]
     ClearGroup(ModelArg),
-    /// Increase permanent offer slots; any payer may fund rent for up to 85 new slots
+    /// Increase permanent offer slots; any payer may fund rent for up to 77 new slots
     #[command(after_help = DOCS)]
     Grow {
         #[command(flatten)]
@@ -344,6 +344,24 @@ pub enum OfferCommand {
 #[derive(Args, Debug, Default)]
 #[group(required = true, multiple = true)]
 pub struct OfferPatch {
+    /// immutable checkpoint identity; SHA-256 of exact UTF-8 bytes is stored on chain
+    #[arg(long, value_parser = parse_checkpoint)]
+    pub checkpoint: Option<[u8; 32]>,
+    /// comma-separated input types: text,image,audio,video
+    #[arg(long, value_parser = parse_modalities)]
+    pub input_modalities: Option<u8>,
+    /// comma-separated output types: text,image,audio,video
+    #[arg(long, value_parser = parse_modalities)]
+    pub output_modalities: Option<u8>,
+    /// offered context window shared by input and output tokens
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub context_tokens: Option<u32>,
+    /// offered maximum conservative input reservation
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub input_bound_tokens: Option<u32>,
+    /// offered maximum output reservation
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub output_tokens: Option<u32>,
     /// USDC per million uncached input tokens, at most 6 decimals
     #[arg(long, value_parser = parse_positive_rate)]
     pub input_price: Option<u32>,
@@ -624,6 +642,19 @@ pub fn parse_positive_usdc(value: &str) -> Result<u64, String> {
 
 #[derive(Args, Debug)]
 pub struct BookArgs {
+    /// minimum provider context window in tokens
+    #[arg(long, default_value_t = 0)]
+    pub min_context: u32,
+    /// record that manual token limits are configured
+    #[arg(long)]
+    pub limits_configured: bool,
+    /// exact immutable checkpoint identity advertised by the model metadata
+    #[arg(long, value_parser = parse_checkpoint)]
+    pub checkpoint: [u8; 32],
+    #[arg(long, default_value = "text", value_parser = parse_modalities)]
+    pub input_modalities: u8,
+    #[arg(long, default_value = "text", value_parser = parse_modalities)]
+    pub output_modalities: u8,
     /// Provider list constraining cheapest eligible matching
     #[arg(long)]
     pub list: Option<Pubkey>,
@@ -715,6 +746,34 @@ impl Cli {
         }
         Ok(cli)
     }
+}
+
+pub fn parse_checkpoint(value: &str) -> Result<[u8; 32], String> {
+    if value.is_empty()
+        || value.chars().count() > 256
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(
+            "expected immutable checkpoint identity without whitespace, at most 256 characters"
+                .into(),
+        );
+    }
+    Ok(fossa_sdk::address::model_id(value))
+}
+pub fn parse_modalities(value: &str) -> Result<u8, String> {
+    value.split(',').try_fold(0, |mask, name| {
+        let bit = match name {
+            "text" => 1,
+            "image" => 2,
+            "audio" => 4,
+            "video" => 8,
+            _ => return Err("expected comma-separated text,image,audio,video".into()),
+        };
+        if mask & bit != 0 {
+            return Err("duplicate modality".into());
+        }
+        Ok(mask | bit)
+    })
 }
 
 #[cfg(test)]

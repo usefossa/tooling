@@ -11,9 +11,16 @@ pub const PROVIDER_LEN: usize = 364;
 pub const MODEL_METADATA_LEN: usize = 396;
 pub const LIST_METADATA_LEN: usize = 396;
 pub const USER_LEN: usize = 128;
-pub const BOOKING_LEN: usize = 472;
+pub const BOOKING_LEN: usize = 520;
 pub const HEADER_LEN: usize = 48;
-pub const TERMS_LEN: usize = 120;
+pub const TERMS_LEN: usize = 132;
+pub const MODALITY_TEXT: u8 = 1;
+pub const MODALITY_IMAGE: u8 = 2;
+pub const MODALITY_AUDIO: u8 = 4;
+pub const MODALITY_VIDEO: u8 = 8;
+pub fn valid_modalities(mask: u8) -> bool {
+    mask != 0 && mask & !15 == 0
+}
 pub const CAPACITY_LEN: usize = 32;
 pub const MAX_ENTRIES: u32 = 4096;
 pub const LIST_HEADER_LEN: usize = 88;
@@ -275,6 +282,12 @@ impl Decode for User {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OfferTerms {
+    pub checkpoint: [u8; 32],
+    pub input_modalities: u8,
+    pub output_modalities: u8,
+    pub context_window: u32,
+    pub max_input: u32,
+    pub max_output: u32,
     pub rates: Rates,
     pub speed_tps: u16,
     pub private: bool,
@@ -285,17 +298,30 @@ impl OfferTerms {
     pub fn validate(self) -> Result<()> {
         self.rates.validate()?;
         ensure(
-            self.speed_tps > 0 && self.capacity > 0,
-            "offer speed or capacity",
+            self.speed_tps > 0
+                && self.capacity > 0
+                && self.checkpoint != [0; 32]
+                && valid_modalities(self.input_modalities)
+                && valid_modalities(self.output_modalities)
+                && self.max_input > 0
+                && self.max_output > 0
+                && self.max_input <= self.context_window
+                && self.max_output <= self.context_window,
+            "offer checkpoint, modalities, speed, capacity or token limits",
         )
     }
     pub fn encode(self) -> Result<Vec<u8>> {
         self.validate()?;
-        let mut out = Vec::with_capacity(20);
+        let mut out = Vec::with_capacity(66);
         self.rates.encode(&mut out);
         out.extend(self.speed_tps.to_le_bytes());
         out.extend([u8::from(self.private), u8::from(self.active)]);
         out.extend(self.capacity.to_le_bytes());
+        out.extend(self.checkpoint);
+        out.extend([self.input_modalities, self.output_modalities]);
+        out.extend(self.context_window.to_le_bytes());
+        out.extend(self.max_input.to_le_bytes());
+        out.extend(self.max_output.to_le_bytes());
         Ok(out)
     }
 }
@@ -342,7 +368,7 @@ fn book<'a>(
     Ok((d, key(d, 8), limit, count as usize))
 }
 impl Decode for TermsBook {
-    const MAGIC: &'static [u8; 8] = &[223, 24, 40, 223, 249, 219, 14, 97];
+    const MAGIC: &'static [u8; 8] = &[136, 206, 216, 233, 146, 248, 21, 65];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let (d, model, limit, count) = book(a, p, Self::MAGIC, TERMS_LEN)?;
         let mut entries = Vec::with_capacity(count);
@@ -351,7 +377,14 @@ impl Decode for TermsBook {
             .0
             .iter()
         {
+            ensure(t[114] == 1 && t[115] == 0, "offer layout version")?;
             let terms = OfferTerms {
+                checkpoint: t[64..96].try_into().unwrap(),
+                input_modalities: t[112],
+                output_modalities: t[113],
+                context_window: n32(t, 120),
+                max_input: n32(t, 124),
+                max_output: n32(t, 128),
                 rates: rates(t, 96),
                 speed_tps: n16(t, 108),
                 private: flag(t, 110)?,
@@ -412,6 +445,14 @@ pub enum BookingStatus {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Booking {
+    pub checkpoint: [u8; 32],
+    pub offer_context_window: u32,
+    pub offer_max_input: u32,
+    pub offer_max_output: u32,
+    pub offer_input_modalities: u8,
+    pub offer_output_modalities: u8,
+    pub requested_input_modalities: u8,
+    pub requested_output_modalities: u8,
     #[serde(with = "crate::serde_pubkey")]
     pub owner: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
@@ -453,7 +494,7 @@ pub struct Booking {
     pub reserve_destination: bool,
 }
 impl Decode for Booking {
-    const MAGIC: &'static [u8; 8] = &[147, 50, 61, 138, 208, 21, 254, 156];
+    const MAGIC: &'static [u8; 8] = &[151, 160, 101, 76, 250, 167, 210, 104];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, BOOKING_LEN)?;
         let status = match d[148] {
@@ -465,6 +506,14 @@ impl Decode for Booking {
         };
         ensure(d[359] == 0, "booking reserved marker")?;
         Ok(Self {
+            checkpoint: d[472..504].try_into().unwrap(),
+            offer_context_window: n32(d, 504),
+            offer_max_input: n32(d, 508),
+            offer_max_output: n32(d, 512),
+            offer_input_modalities: d[516],
+            offer_output_modalities: d[517],
+            requested_input_modalities: d[518],
+            requested_output_modalities: d[519],
             owner: key(d, 8),
             provider: key(d, 40),
             market: key(d, 72),

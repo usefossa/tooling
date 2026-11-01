@@ -196,6 +196,11 @@
           "address": "p2Yicb86aZig616Eav2VWG9vuXR5mEqhtzshZYBxzsV",
           "signer": true,
           "writable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "signer": false,
+          "writable": false
         }
       ],
       "dataBase64": "0hvOqjZeddoIAAAA"
@@ -448,7 +453,7 @@
           "writable": false
         }
       ],
-      "dataBase64": "9n2BAUieChsAAAAA6AMAAGQAAADQBwAAIAABAQoAAAA="
+      "dataBase64": "9n2BAUieChsAAAAA6AMAAGQAAADQBwAAIAABAQoAAAAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEBQEIPAEBCDwBAQg8A"
     },
     "release_booking": {
       "accounts": [
@@ -538,7 +543,7 @@
           "writable": false
         }
       ],
-      "dataBase64": "qhxjGl8L4W0GBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBhAnAADoAwAAIE4AACAAZAAAAMgAAAABUMMAAAAAAAAKAAAAAwAAABQAAAAKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgEHAAAAAAAAAQ=="
+      "dataBase64": "qhxjGl8L4W0GBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBhAnAADoAwAAIE4AACAAZAAAAMgAAAABUMMAAAAAAAAKAAAAAwAAABQAAAAKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAQEAAAAAAAEHAAAAAAAAAQ=="
     },
     "update_list": {
       "accounts": [
@@ -633,7 +638,7 @@
           "writable": false
         }
       ],
-      "dataBase64": "v0YPQuAC+d8AAAAA6AMAAGQAAADQBwAAIAABAQoAAAA="
+      "dataBase64": "v0YPQuAC+d8AAAAA6AMAAGQAAADQBwAAIAABAQoAAAAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEBQEIPAEBCDwBAQg8A"
     },
     "update_profile": {
       "accounts": [
@@ -722,8 +727,8 @@
   },
   "layouts": {
     "Booking": {
-      "bytes": 472,
-      "discriminatorBase64": "kzI9itAV/pw="
+      "bytes": 520,
+      "discriminatorBase64": "l6BlTPqn0mg="
     },
     "Capacity": {
       "bytes": 44,
@@ -755,7 +760,7 @@
     },
     "Terms": {
       "bytes": 44,
-      "discriminatorBase64": "3xgo3/nbDmE="
+      "discriminatorBase64": "iM7Y6ZL4FUE="
     },
     "User": {
       "bytes": 128,

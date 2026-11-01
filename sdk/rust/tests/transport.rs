@@ -530,6 +530,12 @@ async fn onboarding_uses_anchor_initialization_without_external_book_allocations
                 id: format!("example/model{n}"),
                 document: document.clone(),
                 terms: OfferTerms {
+                    checkpoint: [7; 32],
+                    input_modalities: 1,
+                    output_modalities: 1,
+                    context_window: 1_000_000,
+                    max_input: 1_000_000,
+                    max_output: 1_000_000,
                     rates: amount::Rates {
                         input: 1,
                         cached: 1,
@@ -577,7 +583,7 @@ fn inference_v1_v2_headers_verify_exact_body_owner_booking_and_deadline() {
         owner: p.program,
         lamports: 1,
         executable: false,
-        data: vec![0; 472],
+        data: vec![0; fossa_sdk::accounts::BOOKING_LEN],
     };
     raw.data[..8]
         .copy_from_slice(<fossa_sdk::accounts::Booking as fossa_sdk::accounts::Decode>::MAGIC);
@@ -1136,6 +1142,12 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
         let (metadata, meta_bump) = address::model_metadata(&p.program, &model);
         let document = DocumentRef::new([1; 32], "https://example.com/model.json").unwrap();
         let desired = OfferTerms {
+            checkpoint: [7; 32],
+            input_modalities: 1,
+            output_modalities: 1,
+            context_window: 1_000_000,
+            max_input: 1_000_000,
+            max_output: 1_000_000,
             rates: amount::Rates {
                 input: 1,
                 cached: 0,
@@ -1189,7 +1201,7 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
             bytes[44..48].copy_from_slice(&count.to_le_bytes());
         }
         for slot in 0..count as usize {
-            let at = 48 + slot * 120;
+            let at = 48 + slot * 132;
             let mut member = [7; 32];
             member[..4].copy_from_slice(&(slot as u32).to_le_bytes());
             t[at..at + 32].copy_from_slice(if already_registered && slot + 1 == count as usize {
@@ -1198,6 +1210,17 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
                 &member
             });
             t[at + 32..at + 64].copy_from_slice(key(40).as_ref());
+            t[at + 64..at + 96].copy_from_slice(&desired.checkpoint);
+            t[at + 112] = desired.input_modalities;
+            t[at + 113] = desired.output_modalities;
+            t[at + 114] = 1;
+            for (offset, value) in [
+                (120, desired.context_window),
+                (124, desired.max_input),
+                (128, desired.max_output),
+            ] {
+                t[at + offset..at + offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
             t[at + 96..at + 112].copy_from_slice(&desired.encode().unwrap()[..16]);
             t[at + 116..at + 120].copy_from_slice(&1u32.to_le_bytes());
         }

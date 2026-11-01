@@ -68,6 +68,12 @@ pub struct Provider {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
+    pub checkpoint: String,
+    pub input_modalities: String,
+    pub output_modalities: String,
+    pub context_tokens: u32,
+    pub input_bound_tokens: u32,
+    pub output_tokens: u32,
     pub id: String,
     pub metadata_file: PathBuf,
     pub metadata_uri: Option<String>,

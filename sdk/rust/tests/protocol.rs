@@ -49,6 +49,12 @@ fn context() -> (Protocol, ModelKeys, UserKeys, OfferKeys, SettlementKeys) {
 }
 fn terms() -> OfferTerms {
     OfferTerms {
+        checkpoint: [7; 32],
+        input_modalities: 1,
+        output_modalities: 1,
+        context_window: 1_000_000,
+        max_input: 1_000_000,
+        max_output: 1_000_000,
         rates: Rates {
             input: 1_234_567,
             cached: 345_678,
@@ -62,6 +68,11 @@ fn terms() -> OfferTerms {
 }
 fn request() -> BookRequest {
     BookRequest {
+        min_context: 0,
+        limits_configured: false,
+        checkpoint: [7; 32],
+        input_modalities: 1,
+        output_modalities: 1,
         model_id: [4; 32],
         provider_list: key(30),
         rate_caps: Rates {
@@ -121,7 +132,7 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
         (
             "register_offer",
             p.register_offer(o, terms()).unwrap(),
-            32,
+            78,
             7,
             vec![2, 3],
             vec![5],
@@ -137,7 +148,7 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
         (
             "update_offer",
             p.update_offer(o, terms()).unwrap(),
-            32,
+            78,
             4,
             vec![2],
             vec![3],
@@ -146,7 +157,7 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
             "reserve_booking",
             p.book(m, u, k.booking, key(22), &request(), BookingMode::OneShot)
                 .unwrap(),
-            116,
+            155,
             10,
             vec![3, 4, 6],
             vec![5],
@@ -279,9 +290,9 @@ fn instruction_account_order_flags_and_payload_lengths_cover_every_opcode() {
         ),
         (
             "grow_books",
-            p.grow_model(m, key(22), 85).unwrap(),
+            p.grow_model(m, key(22), 77).unwrap(),
             12,
-            5,
+            6,
             vec![1, 2, 3, 4],
             vec![4],
         ),
@@ -359,14 +370,14 @@ fn reusable_variants_and_booking_fields_match_active_layout() {
             },
         )
         .unwrap();
-    assert_eq!(ix.data.len(), 124);
+    assert_eq!(ix.data.len(), 163);
     assert!(!ix.accounts[6].is_signer);
     assert!(!ix.accounts[7].is_signer);
     assert_eq!(&ix.data[8..40], &q.model_id);
     assert_eq!(&ix.data[54..58], &100u32.to_le_bytes());
     assert_eq!(&ix.data[63..71], &10_000u64.to_le_bytes());
     assert_eq!(&ix.data[83..115], q.cache_provider.as_ref());
-    assert_eq!(&ix.data[116..124], &7u64.to_le_bytes());
+    assert_eq!(&ix.data[155..163], &7u64.to_le_bytes());
     let receipt = Receipt {
         owner: u.owner,
         user: u.user,
@@ -455,6 +466,12 @@ fn exact_atomic_math_rounding_boundaries_and_overflow() {
 fn matching_uses_list_full_caps_cache_identity_capacity_and_stable_ties() {
     let (_, m, _, _, _) = context();
     let t = OfferTerms {
+        checkpoint: [7; 32],
+        input_modalities: 1,
+        output_modalities: 1,
+        context_window: 1_000_000,
+        max_input: 1_000_000,
+        max_output: 1_000_000,
         rates: Rates {
             input: 1_000_000,
             cached: 1,
@@ -764,6 +781,12 @@ fn invalid_builders_fail_before_rpc_or_signing() {
         p.update_offer(
             o,
             OfferTerms {
+                checkpoint: [7; 32],
+                input_modalities: 1,
+                output_modalities: 1,
+                context_window: 1_000_000,
+                max_input: 1_000_000,
+                max_output: 1_000_000,
                 rates: Rates {
                     input: 1,
                     cached: 2,
@@ -852,11 +875,16 @@ fn remaining_accounts_decode_exact_fields_and_reject_malformed_records() {
     put(&mut terms_account.data, 44, &1u32.to_le_bytes());
     put(&mut terms_account.data, 48, key(10).as_ref());
     put(&mut terms_account.data, 80, key(11).as_ref());
-    put(&mut terms_account.data, 112, key(12).as_ref());
+    put(&mut terms_account.data, 112, &terms().checkpoint);
     let bytes = terms().encode().unwrap();
     put(&mut terms_account.data, 144, &bytes[..16]);
     terms_account.data[160] = 1;
-    put(&mut terms_account.data, 164, &bytes[16..]);
+    terms_account.data[161] = 1;
+    terms_account.data[162] = 1;
+    for at in [168, 172, 176] {
+        put(&mut terms_account.data, at, &1_000_000u32.to_le_bytes());
+    }
+    put(&mut terms_account.data, 164, &bytes[16..20]);
     assert_eq!(
         TermsBook::decode(&m.terms, &terms_account, &p.program)
             .unwrap()
@@ -1070,4 +1098,76 @@ fn historical_bucket_receipts_keep_generation_and_index_bounds() {
     old.accounts.pop();
     old.data.drain(21..37);
     assert!(PublishedReceipt::from_claim(&protocol.program, &old).is_err());
+}
+
+#[test]
+fn matching_applies_exact_checkpoint_modalities_and_independent_token_limits() {
+    let (_, model, _, _, _) = context();
+    let request = request();
+    let offer = Offer {
+        provider: key(10),
+        payout: key(11),
+        terms: terms(),
+    };
+    let mut book = TermsBook {
+        model: model.model,
+        limit: 1,
+        entries: vec![offer],
+    };
+    let capacity = CapacityBook {
+        model: model.model,
+        limit: 1,
+        entries: vec![Capacity::default()],
+    };
+    let list = ProviderList {
+        market: key(2),
+        authority: key(3),
+        limit: 1,
+        fee_bps: 100,
+        protocol_share: 10_000,
+        providers: vec![key(10)],
+    };
+    assert!(
+        request
+            .select(&book, &capacity, &list, u64::MAX)
+            .unwrap()
+            .is_some()
+    );
+    let original = book.entries[0].terms;
+    let changes: &[fn(&mut OfferTerms)] = &[
+        |offer| offer.checkpoint = [8; 32],
+        |offer| offer.input_modalities = 2,
+        |offer| offer.output_modalities = 2,
+        |offer| offer.max_input = 99,
+        |offer| offer.max_output = 49,
+        |offer| offer.context_window = 149,
+    ];
+    for change in changes {
+        book.entries[0].terms = original;
+        change(&mut book.entries[0].terms);
+        assert!(
+            request
+                .select(&book, &capacity, &list, u64::MAX)
+                .unwrap()
+                .is_none()
+        );
+    }
+    book.entries[0].terms = original;
+    let mut constrained = request.clone();
+    constrained.min_context = original.context_window + 1;
+    constrained.limits_configured = true;
+    assert!(
+        constrained
+            .select(&book, &capacity, &list, u64::MAX)
+            .unwrap()
+            .is_none()
+    );
+    constrained.limits_configured = false;
+    assert!(constrained.validate().is_err());
+    constrained = request.clone();
+    constrained.input_modalities = 16;
+    assert!(constrained.validate().is_err());
+    constrained = request;
+    constrained.checkpoint = [0; 32];
+    assert!(constrained.validate().is_err());
 }
