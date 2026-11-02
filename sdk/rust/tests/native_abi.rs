@@ -41,6 +41,8 @@ fn builders_match_anchor_generated_instruction_data_and_account_metas() {
         slot: 0,
     };
     let settlement = SettlementKeys {
+        wallet_booking_counted: 0,
+        provider_list: key("list"),
         offer,
         user,
         booking: key("booking"),
@@ -66,6 +68,7 @@ fn builders_match_anchor_generated_instruction_data_and_account_metas() {
     let document = DocumentRef::new([29; 32], "https://fixture.invalid/model.json").unwrap();
     let generation = fixture["generation"].as_str().unwrap().parse().unwrap();
     let request = BookRequest {
+        minimum_wallet_capacity: None,
         min_context: 0,
         limits_configured: false,
         checkpoint: [7; 32],

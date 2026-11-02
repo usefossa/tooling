@@ -1556,10 +1556,10 @@ fn reusable_claim_publishes_bound_receipt_without_auxiliary_accounts() {
 fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
     for (limit, donated, succeeds) in [
         (5u32, false, true),
-        (81, true, true),
+        (79, true, true),
         (4, false, false),
         (3, false, false),
-        (82, false, false),
+        (80, false, false),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let wallet = key(5);
@@ -1625,7 +1625,7 @@ fn model_growth_plans_permissionless_rent_and_rejects_invalid_increments() {
             .unwrap();
         if !succeeds {
             assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("1 to 77"));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("1 to 75"));
             continue;
         }
         let plan = result(output);
@@ -1839,5 +1839,72 @@ fn model_assignment_validates_group_market_and_clear_uses_anchor_none() {
             clear["instructions"][0]["accounts"][3]["address"],
             key(1).to_string()
         );
+    }
+}
+
+#[test]
+fn provider_booking_limits_plan_registration_and_updates_without_signing() {
+    for registered in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = key(5);
+        let (profile, profile_bump) = fossa_sdk::address::provider(&key(1), &key(2), &wallet);
+        let (registry, registry_bump) =
+            fossa_sdk::address::provider_policy(&key(1), &key(2), &wallet);
+        let mut p = vec![0; 364];
+        p[..8]
+            .copy_from_slice(<fossa_sdk::accounts::Provider as fossa_sdk::accounts::Decode>::MAGIC);
+        p[8..40].copy_from_slice(key(2).as_ref());
+        p[40..72].copy_from_slice(wallet.as_ref());
+        p[104..106].copy_from_slice(&1u16.to_le_bytes());
+        p[107] = profile_bump;
+        p[108] = b'x';
+        let mut policies = vec![0; 100];
+        policies[..8].copy_from_slice(
+            <fossa_sdk::scoped::ProviderPolicy as fossa_sdk::accounts::Decode>::MAGIC,
+        );
+        policies[8..40].copy_from_slice(key(2).as_ref());
+        policies[40..72].copy_from_slice(wallet.as_ref());
+        policies[72..76].copy_from_slice(&60u32.to_le_bytes());
+        policies[84..92].copy_from_slice(&1u64.to_le_bytes());
+        policies[97] = registry_bump;
+        let raw = |bytes: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
+        let (p, policies) = (raw(p), raw(policies));
+        let mock = mock(move |_, req| {
+            assert_eq!(req["method"], "getAccountInfo");
+            let address = req["params"][0].as_str().unwrap();
+            rpc(
+                req,
+                json!({"context":{"slot":9},"value":if address==key(2).to_string(){market_account(key(4))}else if address==profile.to_string(){p.clone()}else if address==registry.to_string()&&registered{policies.clone()}else{Value::Null}}),
+            )
+        });
+        let mut command = cmd(dir.path());
+        protocol_args(&mut command, &mock.url, wallet);
+        let plan = result(
+            command
+                .args([
+                    "provider",
+                    "booking-limits",
+                    "--window-seconds",
+                    "60",
+                    "--bookings-per-window",
+                    "5",
+                    "--outstanding-bookings",
+                    "2",
+                ])
+                .output()
+                .unwrap(),
+        );
+        let instructions = plan["instructions"].as_array().unwrap();
+        assert_eq!(instructions.len(), if registered { 2 } else { 1 });
+        assert_eq!(
+            instructions.last().unwrap()["discriminator"],
+            instruction_discriminator(if registered {
+                "commit_provider_policy_update"
+            } else {
+                "initialize_provider_policy"
+            })
+        );
+
+        assert!(!dir.path().join("transactions").exists());
     }
 }

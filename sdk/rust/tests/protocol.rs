@@ -40,6 +40,8 @@ fn context() -> (Protocol, ModelKeys, UserKeys, OfferKeys, SettlementKeys) {
         u,
         o,
         SettlementKeys {
+            wallet_booking_counted: 0,
+            provider_list: key(30),
             offer: o,
             user: u,
             booking: key(13),
@@ -68,6 +70,7 @@ fn terms() -> OfferTerms {
 }
 fn request() -> BookRequest {
     BookRequest {
+        minimum_wallet_capacity: None,
         min_context: 0,
         limits_configured: false,
         checkpoint: [7; 32],
@@ -483,6 +486,7 @@ fn matching_uses_list_full_caps_cache_identity_capacity_and_stable_ties() {
         capacity: 1,
     };
     let offer = |provider| Offer {
+        provider_policy: 0,
         provider,
         payout: key(11),
         terms: t,
@@ -494,6 +498,7 @@ fn matching_uses_list_full_caps_cache_identity_capacity_and_stable_ties() {
     };
     let cap = Capacity::default();
     let mut list = ProviderList {
+        routing_enabled: false,
         market: key(2),
         authority: key(8),
         limit: 8,
@@ -629,7 +634,6 @@ fn account_decoders_validate_owner_layout_pdas_bindings_and_padding() {
     put(&mut account.data, 40, authority.as_ref());
     put(&mut account.data, 72, &[42; 32]);
     put(&mut account.data, 104, &1u16.to_le_bytes());
-    account.data[106] = 1;
     account.data[107] = bump;
     account.data[108] = b'x';
     assert_eq!(
@@ -641,8 +645,8 @@ fn account_decoders_validate_owner_layout_pdas_bindings_and_padding() {
     account.data[109] = 1;
     assert!(Provider::decode(&profile, &account, &p.program).is_err());
     account.data[109] = 0;
-    account.data[106] = 2;
-    assert!(Provider::decode(&profile, &account, &p.program).is_ok());
+    account.data[106] = 1;
+    assert!(Provider::decode(&profile, &account, &p.program).is_err());
     let mut capacity = raw(p.program, CapacityBook::MAGIC, 48 + 2 * 32);
     put(&mut capacity.data, 8, m.model.as_ref());
     put(&mut capacity.data, 40, &2u32.to_le_bytes());
@@ -1105,6 +1109,7 @@ fn matching_applies_exact_checkpoint_modalities_and_independent_token_limits() {
     let (_, model, _, _, _) = context();
     let request = request();
     let offer = Offer {
+        provider_policy: 0,
         provider: key(10),
         payout: key(11),
         terms: terms(),
@@ -1120,6 +1125,7 @@ fn matching_applies_exact_checkpoint_modalities_and_independent_token_limits() {
         entries: vec![Capacity::default()],
     };
     let list = ProviderList {
+        routing_enabled: false,
         market: key(2),
         authority: key(3),
         limit: 1,

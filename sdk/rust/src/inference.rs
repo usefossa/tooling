@@ -1,3 +1,5 @@
+pub mod relay;
+
 use crate::{
     Error, Pubkey, Result, Signature, Signer,
     accounts::{Booking, BookingStatus},

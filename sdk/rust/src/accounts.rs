@@ -132,6 +132,7 @@ pub struct Market {
     pub creation_token_program: Pubkey,
     pub creation_net_price: u64,
     pub creation_enabled: bool,
+    pub list_routing_enabled: bool,
     #[serde(with = "crate::serde_pubkey")]
     pub dex_program: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
@@ -149,6 +150,7 @@ impl Decode for Market {
             creation_token_program: key(d, 136),
             creation_net_price: n64(d, 168),
             creation_enabled: flag(d, 176)?,
+            list_routing_enabled: flag(d, 177)?,
             dex_program: key(d, 184),
             dex_config: key(d, 216),
         })
@@ -207,6 +209,7 @@ impl Decode for Provider {
     const MAGIC: &'static [u8; 8] = &[164, 180, 71, 17, 75, 216, 80, 195];
     fn decode(at: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, PROVIDER_LEN)?;
+        ensure(d[106] == 0, "provider reserved byte")?;
         let value = Self {
             market: key(d, 8),
             authority: key(d, 40),
@@ -327,6 +330,7 @@ impl OfferTerms {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Offer {
+    pub provider_policy: u32,
     #[serde(with = "crate::serde_pubkey")]
     pub provider: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
@@ -372,11 +376,7 @@ impl Decode for TermsBook {
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let (d, model, limit, count) = book(a, p, Self::MAGIC, TERMS_LEN)?;
         let mut entries = Vec::with_capacity(count);
-        for t in d[48..48 + count * TERMS_LEN]
-            .as_chunks::<TERMS_LEN>()
-            .0
-            .iter()
-        {
+        for t in d[48..48 + count * TERMS_LEN].as_chunks::<TERMS_LEN>().0 {
             ensure(t[114] == 1 && t[115] == 0, "offer layout version")?;
             let terms = OfferTerms {
                 checkpoint: t[64..96].try_into().unwrap(),
@@ -393,6 +393,7 @@ impl Decode for TermsBook {
             };
             terms.validate()?;
             entries.push(Offer {
+                provider_policy: 0,
                 provider: key(t, 0),
                 payout: key(t, 32),
                 terms,
@@ -445,6 +446,8 @@ pub enum BookingStatus {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Booking {
+    pub provider_policy: u32,
+    pub wallet_booking_counted: u8,
     pub checkpoint: [u8; 32],
     pub offer_context_window: u32,
     pub offer_max_input: u32,
@@ -504,8 +507,13 @@ impl Decode for Booking {
             5 => BookingStatus::Available,
             _ => return Err(crate::Error::Invalid("booking status")),
         };
-        ensure(d[359] == 0, "booking reserved marker")?;
+        ensure(
+            d[359] == 0 && d[144..148] == [0; 4] && d[356] <= 2,
+            "booking reserved marker",
+        )?;
         Ok(Self {
+            provider_policy: n32(d, 140),
+            wallet_booking_counted: d[356],
             checkpoint: d[472..504].try_into().unwrap(),
             offer_context_window: n32(d, 504),
             offer_max_input: n32(d, 508),
@@ -559,6 +567,7 @@ pub struct ProviderList {
     pub limit: u32,
     pub fee_bps: u16,
     pub protocol_share: u16,
+    pub routing_enabled: bool,
     #[serde(serialize_with = "provider_keys")]
     pub providers: Vec<Pubkey>,
 }
@@ -639,6 +648,7 @@ impl Decode for ProviderList {
             limit,
             fee_bps: n16(d, 76),
             protocol_share: n16(d, 78),
+            routing_enabled: flag(d, 80)?,
             providers,
         })
     }
@@ -735,3 +745,5 @@ impl Decode for ModelGroup {
         Ok(value)
     }
 }
+
+pub use crate::booking_limits::BookingLimits;

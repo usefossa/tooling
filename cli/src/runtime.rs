@@ -46,6 +46,7 @@ pub fn rpc(config: &Config) -> Result<RpcClient> {
     }
 }
 pub struct Runtime {
+    pub market: fossa_sdk::accounts::Market,
     pub config: Config,
     pub options: Options,
     pub rpc: RpcClient,
@@ -60,8 +61,9 @@ impl Runtime {
             .transpose()?;
         let rpc = rpc(&config)?;
         let protocol = config.protocol();
-        rpc.validate_market(&protocol).await?;
+        let market = rpc.validate_market(&protocol).await?;
         Ok(Self {
+            market,
             config,
             options,
             rpc,

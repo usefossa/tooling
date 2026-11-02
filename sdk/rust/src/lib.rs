@@ -85,3 +85,6 @@ pub(crate) fn ensure(value: bool, reason: &'static str) -> Result<()> {
         Err(Error::Invalid(reason))
     }
 }
+
+pub mod booking_limits;
+pub mod scoped;

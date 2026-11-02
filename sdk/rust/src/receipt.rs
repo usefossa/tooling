@@ -74,12 +74,29 @@ impl PublishedReceipt {
         let (payload, receipt) = if ix
             .data
             .starts_with(&crate::instruction::discriminator("claim_booking"))
+            || ix
+                .data
+                .starts_with(&crate::instruction::discriminator("claim_list_booking"))
         {
             ensure(
-                ix.data.len() == 141 && matches!(ix.accounts.len(), 11 | 13) && ix.data[20] == 1,
+                ix.data.len() == 141 && matches!(ix.accounts.len(), 11..=14) && ix.data[20] == 1,
                 "published claim accounts or receipt",
             )?;
-            (&ix.data[8..], Receipt::decode(&ix.data[21..])?)
+            let receipt = Receipt::decode(&ix.data[21..])?;
+            if matches!(ix.accounts.len(), 12 | 14) {
+                let ledger = &ix.accounts[11];
+                let provider_wallet = crate::address::provider_wallet(
+                    program,
+                    &ix.accounts[0].pubkey,
+                    &receipt.owner,
+                )
+                .0;
+                ensure(
+                    !ledger.is_signer && ledger.is_writable && ledger.pubkey == provider_wallet,
+                    "published wallet booking account",
+                )?;
+            }
+            (&ix.data[8..], receipt)
         } else {
             ensure(ix.data[0] == 7, "historical claim instruction")?;
             let receipt_offset = match (ix.data.len(), ix.accounts.len()) {

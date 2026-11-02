@@ -472,6 +472,108 @@ async fn group_metadata_and_svg_uploads_sign_exact_bytes_and_reject_unsafe_icons
 }
 
 #[tokio::test]
+async fn scoped_onboarding_uses_selected_list_without_global_policy_registry() {
+    let p = protocol();
+    let provider = key(10);
+    let list = key(12);
+    let mut market = vec![0; MARKET_LEN];
+    market[..8].copy_from_slice(Market::MAGIC);
+    market[8..40].copy_from_slice(provider.as_ref());
+    market[40..72].copy_from_slice(p.mint.as_ref());
+    market[177] = 1;
+    let mut membership = vec![0; LIST_HEADER_LEN + 4 * LIST_SLOT_LEN];
+    membership[..8].copy_from_slice(ProviderList::MAGIC);
+    membership[8..40].copy_from_slice(p.market.as_ref());
+    membership[40..72].copy_from_slice(provider.as_ref());
+    membership[72..76].copy_from_slice(&4u32.to_le_bytes());
+    membership[76..78].copy_from_slice(&10u16.to_le_bytes());
+    membership[78..80].copy_from_slice(&10_000u16.to_le_bytes());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let mock = spawn_mock(move |_, _, body| {
+        let q: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(q["method"], "getAccountInfo");
+        seen.lock().unwrap().push(q["params"][0].clone());
+        let data = if q["params"][0] == p.market.to_string() { Some(&market) }
+            else if q["params"][0] == list.to_string() { Some(&membership) } else { None };
+        rpc_response(body, json!({"context":{"slot":1},"value":data.map(|data|json!({"owner":p.program.to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(data),"base64"]}))}))
+    }).await;
+    let document = DocumentRef::new([1; 32], "https://example.com/metadata.json").unwrap();
+    let config = onboarding::OnboardConfig {
+        provider,
+        payer: provider,
+        document: document.clone(),
+        book_limit: 4,
+        models: vec![onboarding::ModelConfig {
+            id: "example/model".into(),
+            document,
+            terms: OfferTerms {
+                checkpoint: [7; 32],
+                input_modalities: 1,
+                output_modalities: 1,
+                context_window: 1000,
+                max_input: 1000,
+                max_output: 1000,
+                rates: amount::Rates {
+                    input: 1,
+                    cached: 1,
+                    output: 1,
+                },
+                speed_tps: 1,
+                capacity: 10,
+                private: false,
+                active: true,
+            },
+            slot: None,
+        }],
+    };
+    let plan = onboarding::plan_for_list(&RpcClient::new(&mock.url).unwrap(), &p, &config, list)
+        .await
+        .unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let instructions = plan
+        .steps
+        .iter()
+        .flat_map(|step| &step.instructions)
+        .collect::<Vec<_>>();
+    for required in [
+        "initialize_provider",
+        "initialize_provider_policy",
+        "initialize_list_routing",
+        "update_routing_list",
+        "enable_policy_mirror",
+        "initialize_model_capacity",
+        "initialize_list_books",
+        "set_list_offer",
+    ] {
+        assert!(
+            instructions.iter().any(|ix| ix.program_id == p.program
+                && ix.data.starts_with(&instruction::discriminator(required))),
+            "{required}"
+        );
+    }
+    for forbidden in [
+        "initialize_booking_policies",
+        "register_offer",
+        "update_list",
+    ] {
+        assert!(
+            !instructions.iter().any(|ix| ix.program_id == p.program
+                && ix.data.starts_with(&instruction::discriminator(forbidden))),
+            "{forbidden}"
+        );
+    }
+    let global =
+        Pubkey::find_program_address(&[b"booking_policies", p.market.as_ref()], &p.program).0;
+    assert!(!calls.lock().unwrap().contains(&json!(global.to_string())));
+    assert!(
+        onboarding::plan(&RpcClient::new(&mock.url).unwrap(), &p, &config)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn onboarding_registers_without_admission_approval() {
     let p = protocol();
     let admin = key(20);

@@ -45,3 +45,31 @@ pub fn associated_token_with_program(mint: &Pubkey, owner: &Pubkey, token: &Pubk
     )
     .0
 }
+
+pub fn provider_policy(program: &Pubkey, market: &Pubkey, provider: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"provider_policy", market.as_ref(), provider.as_ref()],
+        program,
+    )
+}
+pub fn provider_capacity(program: &Pubkey, model: &Pubkey, provider: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"provider_capacity", model.as_ref(), provider.as_ref()],
+        program,
+    )
+}
+pub fn list_routing(program: &Pubkey, list: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"list_routing", list.as_ref()], program)
+}
+pub fn list_terms(program: &Pubkey, list: &Pubkey, model: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"list_terms", list.as_ref(), model.as_ref()], program)
+}
+pub fn list_capacity(program: &Pubkey, list: &Pubkey, model: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"list_capacity", list.as_ref(), model.as_ref()], program)
+}
+pub fn provider_wallet(program: &Pubkey, market: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"provider_wallet", market.as_ref(), owner.as_ref()],
+        program,
+    )
+}

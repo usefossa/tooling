@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
 mod model_markets;
+pub mod routing;
 
 pub async fn run(cli: Cli) -> Result<Value> {
     preflight(&cli.command)?;
@@ -62,6 +63,7 @@ pub async fn run(cli: Cli) -> Result<Value> {
     }
     let rt = Runtime::connect(config, cli.options).await?;
     match cli.command {
+        Command::Routing(command) => routing::run(&rt, command).await,
         Command::Provider(command) => provider(&rt, command).await,
         Command::Model(command) => model(&rt, command).await,
         Command::Group(command) => model_markets::group(&rt, command).await,
@@ -239,6 +241,11 @@ async fn provider(rt: &Runtime, command: ProviderCommand) -> Result<Value> {
     let wallet = rt.wallet()?;
     let address = address::provider(&rt.protocol.program, &rt.protocol.market, &wallet).0;
     if matches!(command, ProviderCommand::Show) {
+        if rt.market.list_routing_enabled {
+            return Ok(
+                json!({"address":address.to_string(),"provider":rt.rpc.account::<Provider>(address,rt.protocol.program).await?,"provider_policy":rt.rpc.account::<fossa_sdk::scoped::ProviderPolicy>(address::provider_policy(&rt.protocol.program,&rt.protocol.market,&wallet).0,rt.protocol.program).await?}),
+            );
+        }
         return Ok(
             json!({"address":address.to_string(),"provider":rt.rpc.account::<Provider>(address,rt.protocol.program).await?}),
         );
@@ -248,6 +255,22 @@ async fn provider(rt: &Runtime, command: ProviderCommand) -> Result<Value> {
         .account::<Provider>(address, rt.protocol.program)
         .await?;
     match command {
+        ProviderCommand::BookingLimits {
+            window_seconds,
+            bookings_per_window,
+            outstanding_bookings,
+        } => {
+            state.ok_or_else(|| Error::Input("provider missing; use provider register".into()))?;
+            routing::configure_policy(
+                rt,
+                BookingLimits {
+                    wallet_window_seconds: window_seconds,
+                    wallet_bookings_per_window: bookings_per_window,
+                    wallet_booking_capacity: outstanding_bookings,
+                },
+            )
+            .await
+        }
         ProviderCommand::Register(args) => {
             if state.is_some() {
                 return Err(Error::Input(
@@ -359,10 +382,10 @@ async fn model(rt: &Runtime, command: ModelCommand) -> Result<Value> {
                 .await?;
             if model.market != rt.protocol.market
                 || limit <= model.limit
-                || limit - model.limit > 77
+                || limit - model.limit > 75
             {
                 return Err(Error::Input(
-                    "new limit must add 1 to 77 slots in this market".into(),
+                    "new limit must add 1 to 75 slots in this market".into(),
                 ));
             }
             let books = rt
@@ -510,6 +533,9 @@ async fn offer_at(
     Ok((keys, offer, capacities.entries[slot as usize]))
 }
 async fn offer(rt: &Runtime, command: OfferCommand) -> Result<Value> {
+    if rt.market.list_routing_enabled {
+        return Err(Error::Input("List routing is active; use routing show --model or routing offer for the selected list".into()));
+    }
     match command {
         OfferCommand::List(args) => {
             let address = model_address(rt, &args.model)?;
@@ -649,7 +675,12 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
             }
             (
                 "add listed provider",
-                rt.protocol.update_list(address, authority, provider, true),
+                if state.routing_enabled {
+                    rt.protocol
+                        .update_routing_list(address, authority, provider, true, false)
+                } else {
+                    rt.protocol.update_list(address, authority, provider, true)
+                },
             )
         }
         ListCommand::Remove { provider, .. } => {
@@ -658,7 +689,29 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
             }
             (
                 "remove listed provider",
-                rt.protocol.update_list(address, authority, provider, false),
+                if state.routing_enabled {
+                    let policy = rt
+                        .rpc
+                        .account::<fossa_sdk::scoped::ProviderPolicy>(
+                            address::provider_policy(
+                                &rt.protocol.program,
+                                &rt.protocol.market,
+                                &provider,
+                            )
+                            .0,
+                            rt.protocol.program,
+                        )
+                        .await?;
+                    rt.protocol.update_routing_list(
+                        address,
+                        authority,
+                        provider,
+                        false,
+                        policy.is_some(),
+                    )
+                } else {
+                    rt.protocol.update_list(address, authority, provider, false)
+                },
             )
         }
         ListCommand::Close { .. } => {
@@ -673,7 +726,11 @@ async fn provider_list(rt: &Runtime, command: ListCommand) -> Result<Value> {
         _ => unreachable!(),
     };
     let instructions = if matches!(command, ListCommand::Close { .. }) {
-        vec![ix]
+        if state.routing_enabled {
+            vec![rt.protocol.close_list_routing(address, authority), ix]
+        } else {
+            vec![ix]
+        }
     } else {
         vec![
             fossa_sdk::transaction::compute_unit_limit(COMPUTE_UNITS),
@@ -1104,7 +1161,11 @@ async fn onboard(rt: &Runtime) -> Result<Value> {
         book_limit: cfg.model_book_limit.unwrap_or(16),
         models,
     };
-    let plan = onboarding::plan(&rt.rpc, &rt.protocol, &config).await?;
+    let plan = if rt.market.list_routing_enabled {
+        onboarding::plan_for_list(&rt.rpc, &rt.protocol, &config, rt.config.provider_list).await?
+    } else {
+        onboarding::plan(&rt.rpc, &rt.protocol, &config).await?
+    };
     let view = json!({"mode":"plan","operation":"onboard","blockers":plan.blockers,"steps":plan.steps.iter().map(|s|json!({"operation":s.label,"instructions":runtime::instruction_view(&s.instructions)})).collect::<Vec<_>>(),"metadata":documents.iter().map(|(d,_)|document_view(d)).collect::<Vec<_>>()});
     if !rt.options.execute {
         return Ok(view);
@@ -1136,6 +1197,7 @@ async fn onboard(rt: &Runtime) -> Result<Value> {
 
 fn book_request(args: &BookArgs, default_list: Pubkey) -> instruction::BookRequest {
     instruction::BookRequest {
+        minimum_wallet_capacity: args.minimum_wallet_capacity,
         min_context: args.min_context,
         limits_configured: args.limits_configured || args.min_context > 0,
         checkpoint: args.checkpoint,
@@ -1160,6 +1222,9 @@ fn book_request(args: &BookArgs, default_list: Pubkey) -> instruction::BookReque
     }
 }
 async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
+    if rt.market.list_routing_enabled {
+        return routing::book(rt, args).await;
+    }
     let user = rt
         .rpc
         .require_account::<User>(args.user, rt.protocol.program)
@@ -1211,6 +1276,7 @@ async fn book(rt: &Runtime, args: BookArgs) -> Result<Value> {
             instruction::BookingMode::OneShot,
         )?,
     ];
+
     rt.transact("create booking",ix,&[key],json!({"booking":booking.to_string(),"user":args.user.to_string(),"candidate_slot":selected.slot,"reserve_atomic":selected.reserve.to_string(),"selection":"on-chain selection uses execution-time state"})).await
 }
 fn model_checkpoint(model: &crate::config::Model, document: &Document) -> Result<[u8; 32]> {

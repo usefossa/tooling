@@ -1,6 +1,6 @@
 use crate::{
     Error, Instruction, Keypair, Pubkey, Result, RpcClient, Signer,
-    accounts::{Decode, DocumentRef, Model, ModelMetadata, OfferTerms, Provider},
+    accounts::{BookingLimits, Decode, DocumentRef, Model, ModelMetadata, OfferTerms, Provider},
     address, ensure,
     instruction::{InitializeModel, ModelKeys, OfferKeys, Protocol, create_associated_token},
 };
@@ -26,7 +26,7 @@ pub struct PlanStep {
     pub signers: Vec<Keypair>,
 }
 impl PlanStep {
-    fn new(label: impl Into<String>, instructions: Vec<Instruction>) -> Self {
+    pub(crate) fn new(label: impl Into<String>, instructions: Vec<Instruction>) -> Self {
         Self {
             label: label.into(),
             instructions,
@@ -55,7 +55,10 @@ pub async fn plan(
         model.terms.validate()?;
         model.document.encode()?;
     }
-    rpc.validate_market(protocol).await?;
+    ensure(
+        !rpc.validate_market(protocol).await?.list_routing_enabled,
+        "activated routing requires onboarding::plan_for_list",
+    )?;
     let mut plan = OnboardingPlan {
         steps: vec![],
         blockers: vec![],
@@ -212,3 +215,6 @@ pub async fn plan(
     }
     Ok(plan)
 }
+
+mod scoped;
+pub use scoped::plan_for_list;

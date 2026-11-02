@@ -61,6 +61,8 @@ pub struct OfferKeys {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettlementKeys {
+    pub wallet_booking_counted: u8,
+    pub provider_list: Pubkey,
     pub offer: OfferKeys,
     pub user: UserKeys,
     pub booking: Pubkey,
@@ -79,6 +81,8 @@ impl SettlementKeys {
             "settlement account bindings",
         )?;
         Ok(Self {
+            wallet_booking_counted: state.wallet_booking_counted,
+            provider_list: state.provider_list,
             offer: OfferKeys {
                 model,
                 provider: state.provider,
@@ -98,6 +102,8 @@ pub enum BookingMode {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookRequest {
+    #[serde(default)]
+    pub minimum_wallet_capacity: Option<u32>,
     pub min_context: u32,
     pub limits_configured: bool,
     pub checkpoint: [u8; 32],
@@ -121,7 +127,8 @@ pub struct BookRequest {
 impl BookRequest {
     pub fn validate(&self) -> Result<()> {
         ensure(
-            (self.min_context == 0 || self.limits_configured)
+            self.minimum_wallet_capacity != Some(0)
+                && (self.min_context == 0 || self.limits_configured)
                 && self.checkpoint != [0; 32]
                 && accounts::valid_modalities(self.input_modalities)
                 && accounts::valid_modalities(self.output_modalities)
@@ -166,6 +173,16 @@ impl BookRequest {
         list: &ProviderList,
         free: u64,
     ) -> Result<Option<Selection>> {
+        self.select_eligible(terms, capacity, list, free, |_| Ok(true))
+    }
+    pub(crate) fn select_eligible(
+        &self,
+        terms: &TermsBook,
+        capacity: &CapacityBook,
+        list: &ProviderList,
+        free: u64,
+        mut eligible: impl FnMut(&accounts::Offer) -> Result<bool>,
+    ) -> Result<Option<Selection>> {
         self.validate()?;
         ensure(
             (10..=300).contains(&list.fee_bps) && (5000..=10_000).contains(&list.protocol_share),
@@ -200,6 +217,7 @@ impl BookRequest {
                 || r.input > self.rate_caps.input
                 || r.cached > self.rate_caps.cached
                 || r.output > self.rate_caps.output
+                || !eligible(offer)?
             {
                 continue;
             }
@@ -239,7 +257,7 @@ impl BookRequest {
         Ok(best)
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Selection {
     pub slot: u32,
     pub reserve: u64,
@@ -265,7 +283,7 @@ pub fn discriminator(name: &str) -> [u8; 8] {
     hash.update(name.as_bytes());
     hash.finalize()[..8].try_into().unwrap()
 }
-fn generation_payload(generation: Option<u64>) -> Result<Vec<u8>> {
+pub(crate) fn generation_payload(generation: Option<u64>) -> Result<Vec<u8>> {
     let mut payload = vec![u8::from(generation.is_some())];
     if let Some(generation) = generation {
         ensure(generation > 0, "booking generation")?;
@@ -370,6 +388,10 @@ impl Protocol {
         mode: BookingMode,
     ) -> Result<Instruction> {
         ensure(
+            request.minimum_wallet_capacity.unwrap_or(1) == 1,
+            "wallet capacity requires activated list routing",
+        )?;
+        ensure(
             address::model(&self.program, &self.market, &request.model_id).0 == m.model,
             "booking model id",
         )?;
@@ -405,6 +427,10 @@ impl Protocol {
         usage: Usage,
         receipt: Option<&Receipt>,
     ) -> Result<Instruction> {
+        ensure(
+            matches!(k.wallet_booking_counted, 0 | 2),
+            "wallet booking marker",
+        )?;
         let o = k.offer;
         let u = k.user;
         let mut p = Vec::with_capacity(140);
@@ -412,7 +438,7 @@ impl Protocol {
         let mut keys = vec![
             r(self.market),
             r(o.model.model),
-            w(o.model.capacity),
+            w(self.settlement_capacity(k)),
             w(u.user),
             w(k.booking),
             s(o.provider),
@@ -422,6 +448,9 @@ impl Protocol {
             r(address::vault(&self.program, &u.user).0),
             r(TOKEN_PROGRAM),
         ];
+        if k.wallet_booking_counted > 0 {
+            keys.push(self.wallet_booking_meta(k));
+        }
         p.push(u8::from(receipt.is_some()));
         if let Some(c) = receipt {
             ensure(
@@ -434,13 +463,33 @@ impl Protocol {
         if let Some(destinations) = k.fee_destinations {
             keys.extend(destinations.map(w));
         }
-        Ok(self.ix("claim_booking", p, keys))
+        Ok(self.ix(
+            if k.wallet_booking_counted == 0 {
+                "claim_booking"
+            } else {
+                "claim_list_booking"
+            },
+            p,
+            keys,
+        ))
     }
     pub fn expire(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
+        ensure(
+            matches!(k.wallet_booking_counted, 0 | 2),
+            "wallet booking marker",
+        )?;
+        let mut keys = self.settlement_keys(k);
+        if k.wallet_booking_counted > 0 {
+            keys.push(self.wallet_booking_meta(k));
+        }
         Ok(self.ix(
-            "expire_booking",
+            if k.wallet_booking_counted == 0 {
+                "expire_booking"
+            } else {
+                "expire_list_booking"
+            },
             generation_payload(generation)?,
-            self.settlement_keys(k),
+            keys,
         ))
     }
     pub fn withdraw(&self, u: UserKeys, destination: Pubkey, amount: u64) -> Result<Instruction> {
@@ -461,9 +510,24 @@ impl Protocol {
         ))
     }
     pub fn release(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
+        ensure(
+            matches!(k.wallet_booking_counted, 0 | 2),
+            "wallet booking marker",
+        )?;
         let mut keys = self.settlement_keys(k);
         keys.push(s(k.offer.provider));
-        Ok(self.ix("release_booking", generation_payload(generation)?, keys))
+        if k.wallet_booking_counted > 0 {
+            keys.push(self.wallet_booking_meta(k));
+        }
+        Ok(self.ix(
+            if k.wallet_booking_counted == 0 {
+                "release_booking"
+            } else {
+                "release_list_booking"
+            },
+            generation_payload(generation)?,
+            keys,
+        ))
     }
     pub fn close(&self, account: Pubkey, rent_payer: Pubkey, reusable: bool) -> Instruction {
         self.ix(
@@ -677,11 +741,24 @@ impl Protocol {
             ],
         ))
     }
+    fn wallet_booking_meta(&self, k: SettlementKeys) -> AccountMeta {
+        match k.wallet_booking_counted {
+            2 => w(address::provider_wallet(&self.program, &self.market, &k.user.owner).0),
+            _ => r(self.program),
+        }
+    }
+    fn settlement_capacity(&self, k: SettlementKeys) -> Pubkey {
+        if k.wallet_booking_counted == 2 {
+            address::list_capacity(&self.program, &k.provider_list, &k.offer.model.model).0
+        } else {
+            k.offer.model.capacity
+        }
+    }
     fn settlement_keys(&self, k: SettlementKeys) -> Vec<AccountMeta> {
         vec![
             r(self.market),
             r(k.offer.model.model),
-            w(k.offer.model.capacity),
+            w(self.settlement_capacity(k)),
             w(k.user.user),
             w(k.booking),
         ]
@@ -711,7 +788,7 @@ pub fn book_sizes(limit: u32) -> Result<[usize; 2]> {
         "model book limit",
     )?;
     Ok([
-        accounts::HEADER_LEN + limit as usize * accounts::TERMS_LEN,
+        accounts::HEADER_LEN + limit as usize * 132,
         accounts::HEADER_LEN + limit as usize * accounts::CAPACITY_LEN,
     ])
 }

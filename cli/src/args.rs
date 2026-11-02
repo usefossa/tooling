@@ -75,6 +75,9 @@ pub struct Options {
 }
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Manage list-isolated routing, capacity allocations and wallet limits
+    #[command(subcommand, after_help = DOCS)]
+    Routing(crate::commands::routing::Command),
     /// Inspect effective configuration without exposing RPC credentials
     #[command(subcommand, after_help = DOCS)]
     Config(ConfigCommand),
@@ -126,6 +129,16 @@ pub enum ConfigCommand {
 }
 #[derive(Subcommand, Debug)]
 pub enum ProviderCommand {
+    /// Configure on-chain wallet booking limits across all provider models (zero caps mean unlimited)
+    #[command(after_help = DOCS)]
+    BookingLimits {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=86400))]
+        window_seconds: u32,
+        #[arg(long)]
+        bookings_per_window: u32,
+        #[arg(long)]
+        outstanding_bookings: u32,
+    },
     /// Inspect provider PDA and committed metadata reference
     #[command(after_help = DOCS)]
     Show,
@@ -180,7 +193,7 @@ pub enum ModelCommand {
     /// Council sends future bookings' protocol fees to treasury
     #[command(after_help = DOCS)]
     ClearGroup(ModelArg),
-    /// Increase permanent offer slots; any payer may fund rent for up to 77 new slots
+    /// Increase permanent offer slots; any payer may fund rent
     #[command(after_help = DOCS)]
     Grow {
         #[command(flatten)]
@@ -642,6 +655,9 @@ pub fn parse_positive_usdc(value: &str) -> Result<u64, String> {
 
 #[derive(Args, Debug)]
 pub struct BookArgs {
+    /// Minimum advertised provider wallet booking capacity and offer allocation; reserves one booking
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub minimum_wallet_capacity: Option<u32>,
     /// minimum provider context window in tokens
     #[arg(long, default_value_t = 0)]
     pub min_context: u32,
