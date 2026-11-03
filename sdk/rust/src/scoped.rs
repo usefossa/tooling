@@ -156,6 +156,7 @@ pub struct ListOffer {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ListTerms {
+    pub limits_version: u8,
     #[serde(with = "crate::serde_pubkey")]
     pub model: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
@@ -175,7 +176,8 @@ impl Decode for ListTerms {
                 && capacity == n32(d, 104)
                 && address::list_terms(p, &key(d, 40), &key(d, 8)) == (*at, d[112])
                 && address::list_capacity(p, &key(d, 40), &key(d, 8)).0 == key(d, 72)
-                && d[113..116] == [0; 3],
+                && d[113] <= 1
+                && d[114..116] == [0; 2],
             "list terms identity",
         )?;
         let entries = d[120..120 + count * 140]
@@ -184,7 +186,8 @@ impl Decode for ListTerms {
             .iter()
             .map(|row| {
                 ensure(
-                    row[114] == 1
+                    matches!(row[114], 1 | 2)
+                        && (d[113] == 0 || row[114] == 2)
                         && row[115] == 0
                         && row[110] <= 1
                         && row[111] <= 1
@@ -235,6 +238,7 @@ impl Decode for ListTerms {
             "unique offer order",
         )?;
         Ok(Self {
+            limits_version: d[113],
             model: key(d, 8),
             list: key(d, 40),
             capacity_address: key(d, 72),

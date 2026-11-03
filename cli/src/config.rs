@@ -32,6 +32,7 @@ pub struct Solana {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Marketplace {
+    pub provider_limit_lookup_tables: Vec<String>,
     #[serde(deserialize_with = "optional_pubkey")]
     pub program_id: Option<Pubkey>,
     #[serde(deserialize_with = "optional_pubkey")]
@@ -120,6 +121,22 @@ impl Config {
         Self::resolve(options, file, base, &cwd)
     }
     pub fn resolve(o: &Options, file: FileConfig, base: PathBuf, cwd: &Path) -> Result<Self> {
+        let mut tables = std::collections::HashSet::new();
+        if file.marketplace.provider_limit_lookup_tables.len() > 32
+            || file
+                .marketplace
+                .provider_limit_lookup_tables
+                .iter()
+                .any(|table| {
+                    table
+                        .parse::<Pubkey>()
+                        .map_or(true, |table| !tables.insert(table))
+                })
+        {
+            return Err(Error::Input(
+                "Configure at most 32 distinct provider limit lookup table addresses".into(),
+            ));
+        }
         let rpc_url = if o.hosted_rpc == Some(true) {
             None
         } else {

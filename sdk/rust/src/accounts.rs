@@ -133,6 +133,7 @@ pub struct Market {
     pub creation_net_price: u64,
     pub creation_enabled: bool,
     pub list_routing_enabled: bool,
+    pub provider_limits_enabled: bool,
     #[serde(with = "crate::serde_pubkey")]
     pub dex_program: Pubkey,
     #[serde(with = "crate::serde_pubkey")]
@@ -142,6 +143,7 @@ impl Decode for Market {
     const MAGIC: &'static [u8; 8] = &[219, 190, 213, 55, 0, 227, 198, 154];
     fn decode(_: &Pubkey, a: &RawAccount, p: &Pubkey) -> Result<Self> {
         let d = state(a, p, Self::MAGIC, MARKET_LEN)?;
+        ensure(d[177] <= 2 && d[178..184] == [0; 6], "market routing mode")?;
         Ok(Self {
             council: key(d, 8),
             mint: key(d, 40),
@@ -150,7 +152,8 @@ impl Decode for Market {
             creation_token_program: key(d, 136),
             creation_net_price: n64(d, 168),
             creation_enabled: flag(d, 176)?,
-            list_routing_enabled: flag(d, 177)?,
+            list_routing_enabled: d[177] >= 1,
+            provider_limits_enabled: d[177] == 2,
             dex_program: key(d, 184),
             dex_config: key(d, 216),
         })
@@ -508,7 +511,7 @@ impl Decode for Booking {
             _ => return Err(crate::Error::Invalid("booking status")),
         };
         ensure(
-            d[359] == 0 && d[144..148] == [0; 4] && d[356] <= 2,
+            d[359] == 0 && d[144..148] == [0; 4] && d[356] <= 3,
             "booking reserved marker",
         )?;
         Ok(Self {

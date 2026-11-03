@@ -1908,3 +1908,152 @@ fn provider_booking_limits_plan_registration_and_updates_without_signing() {
         assert!(!dir.path().join("transactions").exists());
     }
 }
+
+#[test]
+fn shared_provider_commands_read_canonical_limits_preserve_global_policy_and_reject_legacy_updates()
+{
+    use fossa_sdk::{
+        accounts::Decode,
+        provider_limits::{ProviderLimitIndex, ProviderLimitPage, ProviderLimits, RequestLimits},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = key(5);
+    let (profile, profile_bump) = fossa_sdk::address::provider(&key(1), &key(2), &wallet);
+    let (identity, identity_bump) = fossa_sdk::address::provider_limits(&key(1), &key(2), &wallet);
+    let (page, page_bump) = fossa_sdk::address::provider_limit_page(&key(1), &key(2), 7);
+    let raw = |bytes: Vec<u8>| json!({"owner":key(1).to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(bytes),"base64"]});
+    let mut p = vec![0; 364];
+    p[..8].copy_from_slice(fossa_sdk::accounts::Provider::MAGIC);
+    p[8..40].copy_from_slice(key(2).as_ref());
+    p[40..72].copy_from_slice(wallet.as_ref());
+    p[104..106].copy_from_slice(&1u16.to_le_bytes());
+    p[107] = profile_bump;
+    p[108] = b'x';
+    let mut id = vec![0; 80];
+    id[..8].copy_from_slice(ProviderLimitIndex::MAGIC);
+    id[8..40].copy_from_slice(key(2).as_ref());
+    id[40..72].copy_from_slice(wallet.as_ref());
+    id[72..76].copy_from_slice(&7u32.to_le_bytes());
+    id[76] = identity_bump;
+    let mut page_data = vec![0; 88];
+    page_data[..8].copy_from_slice(ProviderLimitPage::MAGIC);
+    page_data[8..40].copy_from_slice(key(2).as_ref());
+    page_data[40] = page_bump;
+    page_data[41] = 7;
+    for (at, value) in [
+        (44, 1u32),
+        (48, 300),
+        (52, 500),
+        (56, 60),
+        (68, 20),
+        (72, 7),
+        (76, 30),
+        (80, 50),
+        (84, 60),
+    ] {
+        page_data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let p = raw(p);
+    let id = raw(id);
+    let page_data = raw(page_data);
+    let mock = mock(move |_, req| {
+        assert_eq!(req["method"], "getAccountInfo");
+        let at = req["params"][0].as_str().unwrap();
+        let value = if at == key(2).to_string() {
+            let mut market = market_account(key(4));
+            let mut bytes = STANDARD
+                .decode(market["data"][0].as_str().unwrap())
+                .unwrap();
+            bytes[177] = 2;
+            market["data"][0] = STANDARD.encode(bytes).into();
+            market
+        } else if at == profile.to_string() {
+            p.clone()
+        } else if at == identity.to_string() {
+            id.clone()
+        } else if at == page.to_string() {
+            page_data.clone()
+        } else {
+            Value::Null
+        };
+        rpc(req, json!({"context":{"slot":9},"value":value}))
+    });
+    let invoke = |args: &[&str]| {
+        let mut command = cmd(dir.path());
+        protocol_args(&mut command, &mock.url, wallet);
+        command.args(args).output().unwrap()
+    };
+    for args in [vec!["provider", "show"], vec!["routing", "show"]] {
+        let shown = result(invoke(&args));
+        let limits = &shown["provider_limits"];
+        assert_eq!(limits["id"], 7);
+        assert_eq!(limits["page"], page.to_string());
+        assert_eq!(limits["limits"]["global"]["concurrency"], 300);
+        assert_eq!(limits["limits"]["global"]["quota"], 500);
+        assert_eq!(limits["active_bookings"], 7);
+        assert!(shown.get("provider_policy").is_none());
+        assert!(shown.get("capacity_budget").is_none());
+    }
+    let plan = result(invoke(&[
+        "provider",
+        "booking-limits",
+        "--window-seconds",
+        "120",
+        "--bookings-per-window",
+        "8",
+        "--outstanding-bookings",
+        "4",
+    ]));
+    let expected = Protocol {
+        program: key(1),
+        market: key(2),
+        mint: key(3),
+    }
+    .configure_provider_limits(
+        wallet,
+        7,
+        ProviderLimits {
+            global: RequestLimits {
+                concurrency: 300,
+                quota: 500,
+                quota_window_seconds: 60,
+            },
+            wallet: RequestLimits {
+                concurrency: 4,
+                quota: 8,
+                quota_window_seconds: 120,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(plan["instructions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        plan["instructions"][0]["data_hex"],
+        expected
+            .data
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    for args in [
+        vec!["routing", "policy-begin"],
+        vec!["routing", "policy-commit"],
+        vec![
+            "routing",
+            "capacity",
+            "--model",
+            "example/model",
+            "--total",
+            "100",
+        ],
+    ] {
+        let rejected = invoke(&args);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .to_lowercase()
+                .contains("provider limits")
+        );
+    }
+    assert!(!dir.path().join("transactions").exists());
+}

@@ -129,6 +129,25 @@ pub enum ConfigCommand {
 }
 #[derive(Subcommand, Debug)]
 pub enum ProviderCommand {
+    /// Configure provider-wide and per-wallet concurrency and booking quotas across every model and list
+    #[command(after_help = DOCS)]
+    Limits {
+        #[arg(long)]
+        concurrency: u32,
+        #[arg(long)]
+        quota: u32,
+        #[arg(long, default_value_t = 60)]
+        quota_window_seconds: u32,
+        #[arg(long)]
+        wallet_concurrency: u32,
+        #[arg(long)]
+        wallet_quota: u32,
+        #[arg(long, default_value_t = 60)]
+        wallet_quota_window_seconds: u32,
+        /// Storage page for first registration; automatically assigned when omitted
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..32))]
+        page: Option<u8>,
+    },
     /// Configure on-chain wallet booking limits across all provider models (zero caps mean unlimited)
     #[command(after_help = DOCS)]
     BookingLimits {

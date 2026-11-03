@@ -428,7 +428,7 @@ impl Protocol {
         receipt: Option<&Receipt>,
     ) -> Result<Instruction> {
         ensure(
-            matches!(k.wallet_booking_counted, 0 | 2),
+            matches!(k.wallet_booking_counted, 0 | 2 | 3),
             "wallet booking marker",
         )?;
         let o = k.offer;
@@ -475,7 +475,7 @@ impl Protocol {
     }
     pub fn expire(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
         ensure(
-            matches!(k.wallet_booking_counted, 0 | 2),
+            matches!(k.wallet_booking_counted, 0 | 2 | 3),
             "wallet booking marker",
         )?;
         let mut keys = self.settlement_keys(k);
@@ -511,7 +511,7 @@ impl Protocol {
     }
     pub fn release(&self, k: SettlementKeys, generation: Option<u64>) -> Result<Instruction> {
         ensure(
-            matches!(k.wallet_booking_counted, 0 | 2),
+            matches!(k.wallet_booking_counted, 0 | 2 | 3),
             "wallet booking marker",
         )?;
         let mut keys = self.settlement_keys(k);
@@ -743,12 +743,14 @@ impl Protocol {
     }
     fn wallet_booking_meta(&self, k: SettlementKeys) -> AccountMeta {
         match k.wallet_booking_counted {
-            2 => w(address::provider_wallet(&self.program, &self.market, &k.user.owner).0),
+            2 | 3 => w(address::provider_wallet(&self.program, &self.market, &k.user.owner).0),
             _ => r(self.program),
         }
     }
     fn settlement_capacity(&self, k: SettlementKeys) -> Pubkey {
-        if k.wallet_booking_counted == 2 {
+        if k.wallet_booking_counted == 3 {
+            address::provider_limit_page(&self.program, &self.market, (k.offer.slot & 31) as u8).0
+        } else if k.wallet_booking_counted == 2 {
             address::list_capacity(&self.program, &k.provider_list, &k.offer.model.model).0
         } else {
             k.offer.model.capacity

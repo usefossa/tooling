@@ -7,6 +7,7 @@ pub mod inference;
 pub mod instruction;
 pub mod metadata;
 pub mod onboarding;
+pub mod provider_limits;
 pub mod receipt;
 pub mod reserve;
 pub mod rpc;

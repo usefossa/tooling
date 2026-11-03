@@ -313,6 +313,7 @@ fn scoped_selection_keeps_original_ties_and_falls_back_when_wallet_limit_is_full
         order,
     };
     let terms = ListTerms {
+        limits_version: 0,
         model: k(4),
         list: k(5),
         capacity_address: k(6),

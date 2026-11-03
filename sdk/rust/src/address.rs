@@ -73,3 +73,13 @@ pub fn provider_wallet(program: &Pubkey, market: &Pubkey, owner: &Pubkey) -> (Pu
         program,
     )
 }
+
+pub fn provider_limit_page(program: &Pubkey, market: &Pubkey, page: u8) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"provider_limit_page", market.as_ref(), &[page]], program)
+}
+pub fn provider_limits(program: &Pubkey, market: &Pubkey, provider: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"provider_limits", market.as_ref(), provider.as_ref()],
+        program,
+    )
+}

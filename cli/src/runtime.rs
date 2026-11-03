@@ -110,11 +110,35 @@ impl Runtime {
             signers.push(key);
         }
         signers.extend(extra.iter().map(|key| key as &dyn Signer));
-        let pending = self
-            .rpc
-            .prepare(&instructions, payer)
-            .await?
-            .sign(&signers)?;
+        let pending = if self
+            .config
+            .file
+            .marketplace
+            .provider_limit_lookup_tables
+            .is_empty()
+        {
+            self.rpc
+                .prepare(&instructions, payer)
+                .await?
+                .sign(&signers)?
+        } else {
+            let tables = self
+                .config
+                .file
+                .marketplace
+                .provider_limit_lookup_tables
+                .iter()
+                .map(|address| {
+                    address
+                        .parse::<Pubkey>()
+                        .map_err(|_| Error::Input("Invalid provider limit lookup table".into()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.rpc
+                .prepare_with_lookup_tables(&instructions, payer, &tables)
+                .await?
+                .sign(&signers)?
+        };
         self.rpc.simulate(&pending).await?.check()?;
         secure_directory(&self.config.journal)?;
         let path = self.config.journal.join("pending.json");

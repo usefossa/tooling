@@ -11,8 +11,9 @@ pub async fn plan_for_list(
     c: &OnboardConfig,
     list: Pubkey,
 ) -> Result<OnboardingPlan> {
+    let market = rpc.validate_market(p).await?;
     ensure(
-        rpc.validate_market(p).await?.list_routing_enabled,
+        market.list_routing_enabled,
         "list routing activation required",
     )?;
     c.document.encode()?;
@@ -63,6 +64,55 @@ pub async fn plan_for_list(
     if policy.as_ref().is_some_and(|policy| policy.updating) {
         plan.blockers
             .push("Complete provider policy update before enabling list routing".into());
+    }
+    if market.provider_limits_enabled {
+        use crate::provider_limits::{
+            ProviderLimitIndex, ProviderLimitPage, ProviderLimits, RequestLimits,
+        };
+        let identity = rpc
+            .account::<ProviderLimitIndex>(
+                address::provider_limits(&p.program, &p.market, &c.provider).0,
+                p.program,
+            )
+            .await?;
+        if identity.is_none() {
+            let page = Sha256::digest(c.provider.as_ref())[0] & 31;
+            let state = rpc
+                .account::<ProviderLimitPage>(
+                    address::provider_limit_page(&p.program, &p.market, page).0,
+                    p.program,
+                )
+                .await?;
+            let mut ix = Vec::new();
+            if let Some(state) = state {
+                if state.entries.len() == state.capacity as usize {
+                    ix.push(p.grow_provider_limit_page(c.payer, page, state.capacity + 64)?);
+                }
+            } else {
+                ix.push(p.initialize_provider_limit_page(c.payer, page, 64)?);
+            }
+            let wallet = policy
+                .as_ref()
+                .map(|policy| RequestLimits {
+                    concurrency: policy.limits.wallet_booking_capacity,
+                    quota: policy.limits.wallet_bookings_per_window,
+                    quota_window_seconds: policy.limits.wallet_window_seconds,
+                })
+                .unwrap_or_default();
+            ix.push(p.initialize_provider_limits(
+                c.provider,
+                c.payer,
+                page,
+                ProviderLimits {
+                    global: RequestLimits::default(),
+                    wallet,
+                },
+            )?);
+            plan.steps.push(PlanStep::new(
+                "initialize provider-wide concurrency and quota",
+                ix,
+            ));
+        }
     }
     let membership = rpc.require_account::<ProviderList>(list, p.program).await?;
     ensure(membership.market == p.market, "provider list market")?;
@@ -152,7 +202,11 @@ pub async fn plan_for_list(
                 }
             }
             let keys = ModelKeys::from_account(at, &model);
-            let legacy = legacy_active(rpc, p, keys, c.provider).await?;
+            let legacy = if market.provider_limits_enabled {
+                0
+            } else {
+                legacy_active(rpc, p, keys, c.provider).await?
+            };
             (keys, legacy)
         } else {
             let terms = Keypair::new();
@@ -205,43 +259,48 @@ pub async fn plan_for_list(
                 .iter()
                 .find(|entry| entry.offer.provider == c.provider)
         });
-        let budget = rpc
-            .account::<ProviderModelCapacity>(
-                address::provider_capacity(&p.program, &at, &c.provider).0,
-                p.program,
-            )
-            .await?;
-        let old_allocation = old.map(|entry| entry.offer.terms.capacity).unwrap_or(0);
-        let allocated = budget
-            .as_ref()
-            .map(|budget| budget.allocated)
-            .unwrap_or(0)
-            .checked_sub(old_allocation)
-            .and_then(|value| value.checked_add(desired.terms.capacity))
-            .ok_or(Error::Arithmetic)?;
-        let total = budget
-            .as_ref()
-            .map(|budget| budget.total)
-            .unwrap_or(desired.terms.capacity);
-        if u64::from(allocated) + u64::from(legacy) > u64::from(total) {
-            plan.blockers.push(format!("Insufficient global capacity for {}: reduce list allocation, drain legacy bookings, or explicitly configure total capacity",desired.id));
-            continue;
+        if !market.provider_limits_enabled {
+            let budget = rpc
+                .account::<ProviderModelCapacity>(
+                    address::provider_capacity(&p.program, &at, &c.provider).0,
+                    p.program,
+                )
+                .await?;
+            let old_allocation = old.map(|entry| entry.offer.terms.capacity).unwrap_or(0);
+            let allocated = budget
+                .as_ref()
+                .map(|budget| budget.allocated)
+                .unwrap_or(0)
+                .checked_sub(old_allocation)
+                .and_then(|value| value.checked_add(desired.terms.capacity))
+                .ok_or(Error::Arithmetic)?;
+            let total = budget
+                .as_ref()
+                .map(|budget| budget.total)
+                .unwrap_or(desired.terms.capacity);
+            if u64::from(allocated) + u64::from(legacy) > u64::from(total) {
+                plan.blockers.push(format!("Insufficient global capacity for {}: reduce list allocation, drain legacy bookings, or explicitly configure total capacity",desired.id));
+                continue;
+            }
+            if budget.is_none() {
+                plan.steps.push(PlanStep::new(
+                    format!("initialize capacity {}", desired.id),
+                    vec![p.initialize_model_capacity(model, c.provider, c.payer, total)],
+                ));
+            } else if budget
+                .as_ref()
+                .is_some_and(|budget| budget.legacy_active != legacy)
+            {
+                plan.steps.push(PlanStep::new(
+                    format!("sync drained capacity {}", desired.id),
+                    vec![p.sync_legacy_capacity(model, c.provider)],
+                ));
+            }
         }
-        if budget.is_none() {
-            plan.steps.push(PlanStep::new(
-                format!("initialize capacity {}", desired.id),
-                vec![p.initialize_model_capacity(model, c.provider, c.payer, total)],
-            ));
-        } else if budget
-            .as_ref()
-            .is_some_and(|budget| budget.legacy_active != legacy)
+        if old.is_none_or(|old| old.offer.terms != desired.terms)
+            || market.provider_limits_enabled
+                && book.as_ref().is_some_and(|b| b.limits_version == 0)
         {
-            plan.steps.push(PlanStep::new(
-                format!("sync drained capacity {}", desired.id),
-                vec![p.sync_legacy_capacity(model, c.provider)],
-            ));
-        }
-        if old.is_none_or(|old| old.offer.terms != desired.terms) {
             let mut ix = vec![];
             if let Some(book) = &book
                 && old.is_none()
@@ -262,7 +321,11 @@ pub async fn plan_for_list(
             if old.is_none() {
                 ix.push(create_associated_token(c.payer, c.provider, p.mint));
             }
-            ix.push(p.set_list_offer(list, at, c.provider, payout, desired.terms)?);
+            ix.push(if market.provider_limits_enabled {
+                p.set_provider_list_offer(list, at, c.provider, payout, desired.terms)?
+            } else {
+                p.set_list_offer(list, at, c.provider, payout, desired.terms)?
+            });
             plan.steps
                 .push(PlanStep::new(format!("set list offer {}", desired.id), ix));
         }

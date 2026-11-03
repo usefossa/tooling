@@ -18,10 +18,15 @@ keypair = "provider-keypair.json"
 # provider_list = "PROVIDER_LIST_ADDRESS"
 # program_id = "REPLACE_WITH_PROGRAM_PUBLIC_KEY"
 # market = "REPLACE_WITH_MARKET_PUBLIC_KEY"
+# optional address lookup tables for bookings spanning many provider limit pages:
+# provider_limit_lookup_tables = ["LOOKUP_TABLE_ADDRESS"]
 # [hosted]
 # api_url = "https://api.fossa.ag"
 # rpc = false
 
+# set shared booking limits with provider limits --concurrency 300 --quota 300
+# --quota-window-seconds 60 --wallet-concurrency 300 --wallet-quota 300
+# --wallet-quota-window-seconds 60; add --execute after reviewing the plan.
 [provider]
 # optional with keypair; required for key-free planning through own rpc.
 # wallet = "REPLACE_WITH_PROVIDER_PUBLIC_KEY"
@@ -29,6 +34,7 @@ metadata_file = "provider.json"
 # metadata_uri = "https://provider.example.com/immutable/provider.json"
 # omit uri for immutable fossa hosting on --execute.
 speed_tps = 100
+# retained offer wire field; provider limits control shared concurrency in upgraded markets.
 capacity = 4
 private = false
 active = true

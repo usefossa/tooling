@@ -442,6 +442,115 @@ impl RpcClient {
         self.call("getBlockHeight", json!([{"commitment":self.commitment}]))
             .await
     }
+    pub async fn lookup_tables(
+        &self,
+        addresses: &[Pubkey],
+    ) -> Result<Vec<solana_message::AddressLookupTableAccount>> {
+        Ok(self.lookup_tables_context(addresses).await?.value)
+    }
+    async fn lookup_tables_context(
+        &self,
+        addresses: &[Pubkey],
+    ) -> Result<ContextValue<Vec<solana_message::AddressLookupTableAccount>>> {
+        use solana_address_lookup_table_interface::{program, state::AddressLookupTable};
+        let mut seen = std::collections::HashSet::new();
+        ensure(
+            !addresses.is_empty()
+                && addresses.len() <= 32
+                && addresses.iter().all(|key| seen.insert(key)),
+            "unique lookup tables",
+        )?;
+        let values = self.multiple_accounts(addresses).await?;
+        let tables = addresses
+            .iter()
+            .zip(values.value.iter())
+            .map(|(address, raw)| {
+                let raw = raw.as_ref().ok_or(Error::MissingAccount(*address))?;
+                ensure(
+                    raw.owner.to_bytes() == program::id().to_bytes() && !raw.executable,
+                    "lookup table owner",
+                )?;
+                let table = AddressLookupTable::deserialize(&raw.data)
+                    .map_err(|_| Error::Invalid("lookup table data"))?;
+                ensure(
+                    table.meta.deactivation_slot == u64::MAX
+                        && table.meta.last_extended_slot <= values.context.slot
+                        && table.addresses.len() <= 256
+                        && usize::from(table.meta.last_extended_slot_start_index)
+                            <= table.addresses.len(),
+                    "active lookup table",
+                )?;
+                let active = if table.meta.last_extended_slot == values.context.slot {
+                    usize::from(table.meta.last_extended_slot_start_index)
+                } else {
+                    table.addresses.len()
+                };
+                Ok(solana_message::AddressLookupTableAccount {
+                    key: *address,
+                    addresses: table.addresses[..active]
+                        .iter()
+                        .map(|key| Pubkey::new_from_array(key.to_bytes()))
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ContextValue {
+            context: values.context,
+            value: tables,
+        })
+    }
+    pub async fn prepare_with_lookup_tables(
+        &self,
+        instructions: &[Instruction],
+        payer: Pubkey,
+        addresses: &[Pubkey],
+    ) -> Result<crate::transaction::PreparedVersionedTransaction> {
+        ensure(!instructions.is_empty(), "transaction instructions")?;
+        let tables = self.lookup_tables_context(addresses).await?;
+        let latest = self.latest_blockhash_at(tables.context.slot).await?;
+        ensure(
+            latest.min_context_slot >= tables.context.slot,
+            "RPC blockhash context slot",
+        )?;
+        let tables = tables.value;
+        let budget = compute_unit_limit(1_400_000);
+        let mut measured = std::iter::once(budget.clone())
+            .chain(
+                instructions
+                    .iter()
+                    .filter(|ix| ix.program_id != budget.program_id || ix.data.first() != Some(&2))
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        let build = |instructions: &[Instruction]| {
+            crate::transaction::PreparedVersionedTransaction::new(
+                instructions,
+                payer,
+                &tables,
+                &latest,
+            )
+        };
+        let probe = build(&measured)?;
+        let bytes = bincode::serialize(&probe.transaction)
+            .map_err(|_| Error::Invalid("transaction serialization"))?;
+        let response: ContextValue<Simulation> = self.call("simulateTransaction", json!([STANDARD.encode(bytes), {"encoding":"base64","commitment":self.commitment,"sigVerify":false,"minContextSlot":latest.min_context_slot}])).await?;
+        ensure(
+            response.context.slot >= latest.min_context_slot,
+            "RPC simulation context slot",
+        )?;
+        response.value.check()?;
+        let consumed = response
+            .value
+            .units_consumed
+            .ok_or(Error::Invalid("simulation compute units"))?;
+        ensure(
+            consumed > 0 && consumed <= 1_400_000,
+            "simulation compute units",
+        )?;
+        measured[0] =
+            compute_unit_limit((consumed + consumed.div_ceil(10) + 1000).min(1_400_000) as u32);
+        build(&measured)
+    }
     pub async fn prepare(
         &self,
         instructions: &[Instruction],
@@ -551,6 +660,10 @@ impl RpcClient {
     pub async fn simulate(&self, pending: &PendingTransaction) -> Result<Simulation> {
         pending.validate()?;
         let response:ContextValue<Simulation>=self.call("simulateTransaction",json!([pending.wire_base64,{"encoding":"base64","commitment":self.commitment,"sigVerify":true,"minContextSlot":pending.min_context_slot}])).await?;
+        ensure(
+            response.context.slot >= pending.min_context_slot,
+            "RPC simulation context slot",
+        )?;
         Ok(response.value)
     }
     pub async fn signature_status(&self, signature: &Signature) -> Result<Option<SignatureStatus>> {

@@ -241,6 +241,11 @@ async fn provider(rt: &Runtime, command: ProviderCommand) -> Result<Value> {
     let wallet = rt.wallet()?;
     let address = address::provider(&rt.protocol.program, &rt.protocol.market, &wallet).0;
     if matches!(command, ProviderCommand::Show) {
+        if rt.market.provider_limits_enabled {
+            return Ok(
+                json!({"address":address.to_string(),"provider":rt.rpc.account::<Provider>(address,rt.protocol.program).await?,"provider_limits":routing::provider_limits_state(rt,wallet).await?}),
+            );
+        }
         if rt.market.list_routing_enabled {
             return Ok(
                 json!({"address":address.to_string(),"provider":rt.rpc.account::<Provider>(address,rt.protocol.program).await?,"provider_policy":rt.rpc.account::<fossa_sdk::scoped::ProviderPolicy>(address::provider_policy(&rt.protocol.program,&rt.protocol.market,&wallet).0,rt.protocol.program).await?}),
@@ -255,6 +260,35 @@ async fn provider(rt: &Runtime, command: ProviderCommand) -> Result<Value> {
         .account::<Provider>(address, rt.protocol.program)
         .await?;
     match command {
+        ProviderCommand::Limits {
+            concurrency,
+            quota,
+            quota_window_seconds,
+            wallet_concurrency,
+            wallet_quota,
+            wallet_quota_window_seconds,
+            page,
+        } => {
+            use fossa_sdk::provider_limits::{ProviderLimits, RequestLimits};
+            state.ok_or_else(|| Error::Input("Provider missing; use provider register".into()))?;
+            routing::configure_provider_limits(
+                rt,
+                ProviderLimits {
+                    global: RequestLimits {
+                        concurrency,
+                        quota,
+                        quota_window_seconds,
+                    },
+                    wallet: RequestLimits {
+                        concurrency: wallet_concurrency,
+                        quota: wallet_quota,
+                        quota_window_seconds: wallet_quota_window_seconds,
+                    },
+                },
+                page,
+            )
+            .await
+        }
         ProviderCommand::BookingLimits {
             window_seconds,
             bookings_per_window,

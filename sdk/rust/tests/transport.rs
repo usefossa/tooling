@@ -1392,3 +1392,119 @@ async fn onboarding_grows_full_books_atomically_only_when_registration_needs_a_s
         PreparedTransaction::new(instructions, key(11), Hash::default(), 100, 0).unwrap();
     }
 }
+
+fn lookup_table_data(extended: u64, start: u8, inactive: bool) -> Vec<u8> {
+    use solana_address_lookup_table_interface::state::{AddressLookupTable, LookupTableMeta};
+    AddressLookupTable {
+        meta: LookupTableMeta {
+            last_extended_slot: extended,
+            last_extended_slot_start_index: start,
+            deactivation_slot: if inactive { 8 } else { u64::MAX },
+            ..Default::default()
+        },
+        addresses: (5..=6)
+            .map(|n| key(n).to_bytes().into())
+            .collect::<Vec<_>>()
+            .into(),
+    }
+    .serialize_for_tests()
+    .unwrap()
+}
+#[tokio::test]
+async fn lookup_tables_validate_owner_activation_bounds_and_snapshot_slot() {
+    for (case, expected) in [
+        (0, Some(2)),
+        (1, Some(1)),
+        (2, None),
+        (3, None),
+        (4, None),
+        (5, None),
+        (6, None),
+    ] {
+        let mock=spawn_mock(move |_,_,body| {
+            let q:Value=serde_json::from_slice(body).unwrap();assert_eq!(q["method"],"getMultipleAccounts");
+            assert_eq!(q["params"][0],json!([key(100).to_string()]));
+            let raw=lookup_table_data(if case==1 {9} else if case==4 {10} else {8},if case==5 {3} else {1},case==2);
+            let owner=if case==3 {key(1).to_string()} else {solana_address_lookup_table_interface::program::id().to_string()};
+            rpc_response(body,json!({"context":{"slot":9},"value":[{"owner":owner,"lamports":1,"executable":case==6,"data":[STANDARD.encode(raw),"base64"]}]}))
+        }).await;
+        let rpc = RpcClient::new(&mock.url).unwrap();
+        let tables = rpc.lookup_tables(&[key(100)]).await;
+        match expected {
+            Some(count) => {
+                let tables = tables.unwrap();
+                assert_eq!(tables[0].key, key(100));
+                assert_eq!(tables[0].addresses.len(), count);
+                assert_eq!(tables[0].addresses[0], key(5));
+            }
+            None => assert!(tables.is_err()),
+        }
+        assert!(rpc.lookup_tables(&[key(100), key(100)]).await.is_err());
+    }
+    let mock=spawn_mock(move |_,_,body| {
+        let q:Value=serde_json::from_slice(body).unwrap();
+        let value=if q["method"]=="getMultipleAccounts" {json!({"context":{"slot":9},"value":[{"owner":solana_address_lookup_table_interface::program::id().to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(lookup_table_data(8,1,false)),"base64"]}]})} else {
+            assert_eq!(q["method"],"getLatestBlockhash");assert_eq!(q["params"][0]["minContextSlot"],9);
+            json!({"context":{"slot":8},"value":{"blockhash":Hash::default().to_string(),"lastValidBlockHeight":100}})
+        };rpc_response(body,value)
+    }).await;
+    assert!(
+        RpcClient::new(&mock.url)
+            .unwrap()
+            .prepare_with_lookup_tables(
+                &[protocol().update_list(key(5), key(7), key(6), true)],
+                key(7),
+                &[key(100)]
+            )
+            .await
+            .is_err()
+    );
+}
+#[tokio::test]
+async fn versioned_prepare_measures_and_resumes_exact_signed_bytes() {
+    use solana_message::VersionedMessage;
+    use solana_transaction::versioned::VersionedTransaction;
+    let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = sent.clone();
+    let mock=spawn_mock(move |_,_,body| {
+        let q:Value=serde_json::from_slice(body).unwrap();
+        let value=match q["method"].as_str().unwrap() {
+            "getMultipleAccounts"=>json!({"context":{"slot":9},"value":[{"owner":solana_address_lookup_table_interface::program::id().to_string(),"lamports":1,"executable":false,"data":[STANDARD.encode(lookup_table_data(8,1,false)),"base64"]}]}),
+            "getLatestBlockhash"=>{assert_eq!(q["params"][0]["minContextSlot"],9);json!({"context":{"slot":10},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}})},
+            "simulateTransaction"=>{
+                assert_eq!(q["params"][1]["minContextSlot"],10);
+                let tx:VersionedTransaction=bincode::deserialize(&STANDARD.decode(q["params"][0].as_str().unwrap()).unwrap()).unwrap();
+                let VersionedMessage::V0(message)=&tx.message else {panic!("v0 expected")};
+                assert_eq!(message.address_table_lookups[0].account_key,key(100));
+                if q["params"][1]["sigVerify"]==true {tx.verify_and_hash_message().unwrap();assert_eq!(message.instructions[0].data,transaction::compute_unit_limit(18600).data);} else {assert_eq!(message.instructions[0].data,transaction::compute_unit_limit(1_400_000).data);}
+                json!({"context":{"slot":10},"value":{"err":null,"unitsConsumed":16000}})
+            },
+            "sendTransaction"=>{let wire=q["params"][0].as_str().unwrap().to_owned();let tx:VersionedTransaction=bincode::deserialize(&STANDARD.decode(&wire).unwrap()).unwrap();tx.verify_and_hash_message().unwrap();captured.lock().unwrap().push(wire);json!(tx.signatures[0].to_string())},
+            "getSignatureStatuses"=>json!({"context":{"slot":10},"value":[null]}),
+            "getBlockHeight"=>json!(50),
+            method=>panic!("unexpected method {method}"),
+        };rpc_response(body,value)
+    }).await;
+    let rpc = RpcClient::new(&mock.url).unwrap();
+    let signer = signer();
+    let prepared = rpc
+        .prepare_with_lookup_tables(
+            &[protocol().update_list(key(5), signer.pubkey(), key(6), true)],
+            signer.pubkey(),
+            &[key(100)],
+        )
+        .await
+        .unwrap();
+    let pending = prepared.sign(&[&signer]).unwrap();
+    rpc.simulate(&pending).await.unwrap().check().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.json");
+    pending.save(&path).unwrap();
+    rpc.broadcast(&pending).await.unwrap();
+    let loaded = PendingTransaction::load(&path).unwrap();
+    rpc.submit(&loaded).await.unwrap();
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![pending.wire_base64.clone(), pending.wire_base64]
+    );
+}

@@ -4,6 +4,8 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use solana_message::Message;
+use solana_message::{AddressLookupTableAccount, VersionedMessage, v0};
+use solana_transaction::versioned::VersionedTransaction;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -13,6 +15,76 @@ use std::{
 use zeroize::Zeroizing;
 
 pub const MAX_TRANSACTION_BYTES: usize = 1232;
+
+pub struct PreparedVersionedTransaction {
+    pub transaction: VersionedTransaction,
+    pub last_valid_block_height: u64,
+    pub min_context_slot: u64,
+}
+impl PreparedVersionedTransaction {
+    pub fn new(
+        instructions: &[Instruction],
+        payer: Pubkey,
+        tables: &[AddressLookupTableAccount],
+        latest: &crate::rpc::LatestBlockhash,
+    ) -> Result<Self> {
+        ensure(!instructions.is_empty(), "transaction instructions")?;
+        let mut seen = std::collections::HashSet::new();
+        ensure(
+            tables.len() <= 32
+                && tables
+                    .iter()
+                    .all(|table| table.addresses.len() <= 256 && seen.insert(table.key)),
+            "unique lookup tables",
+        )?;
+        let message =
+            v0::Message::try_compile(&payer, instructions, tables, latest.blockhash.clone())
+                .map_err(|_| Error::Invalid("lookup table transaction"))?;
+        let transaction = VersionedTransaction {
+            signatures: vec![
+                Signature::default();
+                usize::from(message.header.num_required_signatures)
+            ],
+            message: VersionedMessage::V0(message),
+        };
+        transaction
+            .sanitize()
+            .map_err(|_| Error::Invalid("versioned transaction message"))?;
+        ensure(
+            bincode::serialized_size(&transaction)
+                .map_err(|_| Error::Invalid("transaction serialization"))?
+                <= MAX_TRANSACTION_BYTES as u64,
+            "transaction packet size; provide lookup tables covering the counter pages",
+        )?;
+        Ok(Self {
+            transaction,
+            last_valid_block_height: latest.last_valid_block_height,
+            min_context_slot: latest.min_context_slot,
+        })
+    }
+    pub fn sign(mut self, signers: &[&dyn Signer]) -> Result<PendingTransaction> {
+        validate_versioned(&self.transaction)?;
+        let bytes = self.transaction.message.serialize();
+        let required = usize::from(self.transaction.message.header().num_required_signatures);
+        for (index, key) in self.transaction.message.static_account_keys()[..required]
+            .iter()
+            .enumerate()
+        {
+            let signer = signers
+                .iter()
+                .find(|signer| signer.try_pubkey().is_ok_and(|value| value == *key))
+                .ok_or(Error::Invalid("required signature"))?;
+            self.transaction.signatures[index] = signer
+                .try_sign_message(&bytes)
+                .map_err(|error| Error::Signing(error.to_string()))?;
+        }
+        PendingTransaction::from_versioned_transaction(
+            &self.transaction,
+            self.last_valid_block_height,
+            self.min_context_slot,
+        )
+    }
+}
 pub fn compute_unit_limit(units: u32) -> Instruction {
     let mut data = Vec::with_capacity(5);
     data.push(2);
@@ -137,6 +209,53 @@ impl std::fmt::Debug for PendingTransaction {
     }
 }
 impl PendingTransaction {
+    pub fn from_versioned_transaction(
+        transaction: &VersionedTransaction,
+        last_valid_block_height: u64,
+        min_context_slot: u64,
+    ) -> Result<Self> {
+        validate_versioned(transaction)?;
+        transaction
+            .verify_and_hash_message()
+            .map_err(|_| Error::Invalid("transaction signatures"))?;
+        let bytes = bincode::serialize(transaction)
+            .map_err(|_| Error::Invalid("transaction serialization"))?;
+        ensure(
+            bytes.len() <= MAX_TRANSACTION_BYTES && !transaction.signatures.is_empty(),
+            "transaction packet",
+        )?;
+        Ok(Self {
+            version: 1,
+            signature: transaction.signatures[0].to_string(),
+            wire_base64: STANDARD.encode(bytes),
+            last_valid_block_height,
+            min_context_slot,
+        })
+    }
+    pub fn versioned_transaction(&self) -> Result<VersionedTransaction> {
+        ensure(
+            self.version == 1 && self.wire_base64.len() <= MAX_TRANSACTION_BYTES.div_ceil(3) * 4,
+            "pending transaction format",
+        )?;
+        let bytes = STANDARD
+            .decode(&self.wire_base64)
+            .map_err(|_| Error::Invalid("transaction base64"))?;
+        ensure(
+            bytes.len() <= MAX_TRANSACTION_BYTES,
+            "transaction packet size",
+        )?;
+        let tx: VersionedTransaction =
+            bincode::deserialize(&bytes).map_err(|_| Error::Invalid("transaction wire bytes"))?;
+        ensure(
+            bincode::serialize(&tx).map_err(|_| Error::Invalid("transaction serialization"))?
+                == bytes,
+            "canonical transaction bytes",
+        )?;
+        validate_versioned(&tx)?;
+        tx.verify_and_hash_message()
+            .map_err(|_| Error::Invalid("transaction signatures"))?;
+        Ok(tx)
+    }
     pub fn from_transaction(
         transaction: &Transaction,
         last_valid_block_height: u64,
@@ -188,7 +307,7 @@ impl PendingTransaction {
         Ok(transaction)
     }
     pub fn validate(&self) -> Result<Signature> {
-        let transaction = self.transaction()?;
+        let transaction = self.versioned_transaction()?;
         let signature = Signature::from_str(&self.signature)
             .map_err(|_| Error::Invalid("pending signature"))?;
         ensure(
@@ -249,6 +368,21 @@ pub fn read_keypair(path: impl AsRef<Path>) -> Result<Keypair> {
     ensure(bytes.len() <= 4096, "keypair file size")?;
     let values: Zeroizing<Vec<u8>> = Zeroizing::new(serde_json::from_slice(&bytes)?);
     Keypair::try_from(values.as_slice()).map_err(|_| Error::Invalid("64-byte Solana keypair"))
+}
+
+fn validate_versioned(transaction: &VersionedTransaction) -> Result<()> {
+    ensure(
+        matches!(
+            transaction.message,
+            VersionedMessage::Legacy(_) | VersionedMessage::V0(_)
+        ) && !transaction.signatures.is_empty()
+            && transaction.message.header().num_readonly_signed_accounts
+                < transaction.message.header().num_required_signatures,
+        "transaction message header",
+    )?;
+    transaction
+        .sanitize()
+        .map_err(|_| Error::Invalid("versioned transaction message"))
 }
 
 fn validate_message(transaction: &Transaction) -> Result<()> {
