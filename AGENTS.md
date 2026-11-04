@@ -1,4 +1,4 @@
-# providers
+# tooling
 
 fossa cli, rust sdk and metadata schema for fossa. [documentation](https://fossa.ag/docs/providers/cli).
 

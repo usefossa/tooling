@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: providers-${{ github.ref }}
+  group: tooling-${{ github.ref }}
   cancel-in-progress: false
 env:
   RUST_VERSION: '1.99.0'
