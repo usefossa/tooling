@@ -1,19 +1,43 @@
 # tooling
 
-fossa cli, rust sdk and metadata schema for fossa. [documentation](https://fossa.ag/docs/providers/cli).
+## scope
 
-- `sdk/rust/`: complete protocol sdk; offline builders, typed accounts, pooled rpc and signing.
-- `cli/`: noninteractive rust binary using sdk. help and linked website docs replace skills.
-- `schema/`: canonical metadata schema, validator and conformance cases. preserve contract and exact document bytes.
+protocol CLI, Rust SDK, and canonical metadata schemas. see [tooling documentation](https://fossa.ag/docs/providers/cli).
+
+- `cli/`: noninteractive Rust CLI using the SDK.
+- `sdk/rust/`: protocol SDK with offline builders, typed accounts, pooled RPC, and signing.
+- `schema/`: canonical metadata schema, validator, and conformance cases.
 
 ## workflow
 
-- read implementation first. use subagents only when requested.
-- no commits, pushes, deployments or services unless requested. tooling releases never authorize onboarding, signing, program deployment or fund movement.
-- keep prose/comments lowercase and compact. preserve exact identifiers, paths, commands and user-facing strings. label every fenced code block with its language.
-- configuration and signer files stay outside git. examples use placeholders. never log secrets or signed transaction bytes.
-- cli defaults to inspection/planning; execution requires explicit flag. never prompt interactively. emit machine-readable output and useful errors/help.
-- keep sdk transport pooled and reusable; preserve exact accounting, account bindings and instruction compatibility. custom rpc and metadata hosting remain supported.
-- schema consumers vendor independent copies; no sibling runtime dependencies or schema downloads. use `bun schema/sync.ts --check` with explicit affected targets.
-- before requested commit/push, run `cargo fmt --all --check`, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and final diff review. tests use synthetic keys and mock rpc only.
-- bump affected semver for behavior changes; tag requested releases `vX.Y.Z`. commits use `[fix]`, `[feat]`, `[add]`, `[update]`, lowercase single line, no attribution.
+- read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
+- deployments and package publication require an explicit request. tooling releases do not authorize onboarding, signing, program deployment, or fund movement.
+- preserve unrelated configuration, signer files, metadata commitments, and transaction journals.
+
+## implementation
+
+- CLI commands inspect or plan by default; execution requires an explicit flag. never prompt interactively. return machine-readable output and useful errors and help.
+- keep SDK transport pooled and reusable. preserve exact accounting, account bindings, and instruction compatibility. custom RPC and metadata hosting remain supported.
+- preserve canonical metadata validation and exact document bytes. consumers vendor independent copies without sibling runtime dependencies or schema downloads.
+- synchronize explicit targets with `bun schema/sync.ts --check` or `--write`: use repeatable `--rust PATH`, `--frontend PATH`, or `--indexer PATH` options. inspect changes before writing consumer copies.
+- CLI help and linked documentation describe setup and usage. label fenced code blocks with their language.
+- keep readmes to documentation links: one properly capitalized link per component, each on its own line. public documentation explains integration contracts without private operational details.
+
+## configuration and security
+
+- configuration and signer files stay outside git; examples contain placeholders only.
+- never log or commit secrets, private user state, or signed transaction bytes.
+- preserve transaction journals and reconcile uncertain submissions before preparing replacements.
+
+## verification
+
+- before a requested commit or push, run `cargo fmt --all --check`, `cargo test --workspace --locked`, and `cargo clippy --workspace --all-targets --locked -- -D warnings`, then review the final diff.
+- tests use synthetic keys and mock RPC only. schema changes also require conformance coverage and checks against affected vendored copies.
+
+## commits and releases
+
+- create commits and push only when explicitly requested.
+- use `[type] short description`; allowed types are `[fix]`, `[feat]`, `[add]`, and `[update]`.
+- messages must be one lowercase line. combine multiple changes with `+`.
+- never add attribution or `co-authored-by` trailers.
+- bump affected versions with semver for behavior or release changes. tag requested releases `vX.Y.Z`.
