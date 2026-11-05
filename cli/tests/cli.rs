@@ -288,7 +288,7 @@ fn fresh_execution_simulates_saves_before_broadcast_and_archives_confirmed_bytes
                 json!({"context":{"slot":9},"value":{"blockhash":Hash::new_from_array([8;32]).to_string(),"lastValidBlockHeight":100}})
             }
             "simulateTransaction" => {
-                assert!(req["params"][1]["sigVerify"].is_boolean());
+                assert_eq!(req["params"][1]["sigVerify"], false);
                 assert!(!journal.exists());
                 *seen_wire.lock().unwrap() = Some(req["params"][0].as_str().unwrap().into());
                 json!({"context":{"slot":9},"value":{"err":null,"logs":[],"unitsConsumed":100}})
@@ -296,10 +296,14 @@ fn fresh_execution_simulates_saves_before_broadcast_and_archives_confirmed_bytes
             "sendTransaction" => {
                 let pending = PendingTransaction::load(&journal).unwrap();
                 assert_eq!(pending.wire_base64, req["params"][0]);
-                assert_eq!(
+                assert_ne!(
                     Some(pending.wire_base64.clone()),
                     *seen_wire.lock().unwrap()
                 );
+                let mut simulation = pending.clone();
+                simulation.wire_base64 = seen_wire.lock().unwrap().as_ref().unwrap().clone();
+                assert!(simulation.validate().is_err());
+                *seen_wire.lock().unwrap() = Some(pending.wire_base64.clone());
                 json!(pending.signature)
             }
             "getSignatureStatuses" => {
@@ -387,8 +391,10 @@ fn expired_resume_checks_status_twice_and_keeps_journal_without_broadcast() {
         rpc(
             req,
             match method {
-                "getSignatureStatuses" => json!({"context":{"slot":9},"value":[null]}),
-                "getBlockHeight" => json!(101),
+                "getSignatureStatuses" => json!({"context":{"slot":20},"value":[null]}),
+                "getBlockHeight" => json!(133),
+                "getEpochInfo" => json!({"absoluteSlot":20,"blockHeight":133}),
+                "isBlockhashValid" => json!({"context":{"slot":20},"value":false}),
                 _ => panic!("unexpected {method}"),
             },
         )
@@ -416,6 +422,10 @@ fn expired_resume_checks_status_twice_and_keeps_journal_without_broadcast() {
         vec![
             "getSignatureStatuses",
             "getBlockHeight",
+            "getEpochInfo",
+            "isBlockhashValid",
+            "isBlockhashValid",
+            "isBlockhashValid",
             "getSignatureStatuses"
         ]
     );

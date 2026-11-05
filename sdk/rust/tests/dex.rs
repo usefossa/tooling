@@ -357,6 +357,161 @@ fn liquidity_preserves_full_direct_withdrawal_and_locked_founders() {
     );
 }
 #[test]
+fn liquidity_recovers_burned_supply_without_gifting_existing_reserves() {
+    let taxed = [
+        TransferFee {
+            basis_points: 300,
+            maximum_fee: u64::MAX,
+        },
+        TransferFee {
+            basis_points: 100,
+            maximum_fee: 2,
+        },
+    ];
+    for (reserve_a, reserve_b) in [(113, 359), (1, 1_000_000), (1_000_000, 1)] {
+        let pool = Pool {
+            status: PoolStatus::Amm,
+            reserve_a,
+            reserve_b,
+            ..Pool::default()
+        };
+        let locked_lp = integer_sqrt(u128::from(reserve_a) * u128::from(reserve_b));
+        for fees in [untaxed(), taxed] {
+            for amount in [1, 37, 201] {
+                let args = LiquidityArgs {
+                    amount,
+                    bound_a: u64::MAX,
+                    bound_b: u64::MAX,
+                };
+                let quote = add_liquidity(&pool, fees, 0, args).unwrap();
+                let exact = LiquidityArgs {
+                    bound_a: quote.gross_a,
+                    bound_b: quote.gross_b,
+                    ..args
+                };
+                assert_eq!(add_liquidity(&pool, fees, 0, exact).unwrap(), quote);
+                assert!(
+                    add_liquidity(
+                        &pool,
+                        fees,
+                        0,
+                        LiquidityArgs {
+                            bound_a: quote.gross_a - 1,
+                            ..exact
+                        }
+                    )
+                    .is_err()
+                );
+                assert!(
+                    add_liquidity(
+                        &pool,
+                        fees,
+                        0,
+                        LiquidityArgs {
+                            bound_b: quote.gross_b - 1,
+                            ..exact
+                        }
+                    )
+                    .is_err()
+                );
+                let recovered = Pool {
+                    reserve_a: reserve_a + quote.net_a,
+                    reserve_b: reserve_b + quote.net_b,
+                    locked_lp,
+                    ..pool.clone()
+                };
+                let gross_a =
+                    mul_div(recovered.reserve_a, amount, locked_lp + amount, false).unwrap();
+                let gross_b =
+                    mul_div(recovered.reserve_b, amount, locked_lp + amount, false).unwrap();
+                assert!(gross_a <= quote.net_a && gross_b <= quote.net_b);
+                assert!(recovered.reserve_a - gross_a >= reserve_a);
+                assert!(recovered.reserve_b - gross_b >= reserve_b);
+                let withdrawal = remove_liquidity(
+                    &recovered,
+                    fees,
+                    amount,
+                    LiquidityArgs {
+                        amount,
+                        bound_a: 0,
+                        bound_b: 0,
+                    },
+                );
+                if gross_a == 0 || gross_b == 0 {
+                    assert!(withdrawal.is_err());
+                } else {
+                    let withdrawal = withdrawal.unwrap();
+                    assert_eq!((withdrawal.gross_a, withdrawal.gross_b), (gross_a, gross_b));
+                }
+            }
+        }
+    }
+    let pool = Pool {
+        status: PoolStatus::Amm,
+        reserve_a: 113,
+        reserve_b: 359,
+        ..Pool::default()
+    };
+    let args = LiquidityArgs {
+        amount: 37,
+        bound_a: 100,
+        bound_b: 100,
+    };
+    let quote = add_liquidity(&pool, taxed, 0, args).unwrap();
+    assert_eq!(
+        (quote.net_a, quote.net_b, quote.gross_a, quote.gross_b),
+        (21, 67, 22, 68)
+    );
+    for (reserve_a, reserve_b) in [(0, 359), (113, 0)] {
+        assert!(
+            add_liquidity(
+                &Pool {
+                    reserve_a,
+                    reserve_b,
+                    ..pool.clone()
+                },
+                taxed,
+                0,
+                args
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn liquidity_checks_combined_locked_supply_and_reserve_capacity() {
+    for (supply, locked_lp, reserve_a, reserve_b) in [
+        (0, 0, u64::MAX - 1, u64::MAX - 1),
+        (1, u64::MAX - 2, 1, 1),
+        (10, 0, u64::MAX - 1, 1),
+    ] {
+        let pool = Pool {
+            status: PoolStatus::Amm,
+            locked_lp,
+            reserve_a,
+            reserve_b,
+            ..Pool::default()
+        };
+        let args = LiquidityArgs {
+            amount: 2,
+            bound_a: u64::MAX,
+            bound_b: u64::MAX,
+        };
+        assert!(add_liquidity(&pool, untaxed(), supply, args).is_err());
+        if supply != 10 {
+            assert!(
+                add_liquidity(
+                    &pool,
+                    untaxed(),
+                    supply,
+                    LiquidityArgs { amount: 1, ..args }
+                )
+                .is_ok()
+            );
+        }
+    }
+}
+#[test]
 fn oracle_requires_window_and_preserves_wrap_and_expiry() {
     let pool = Pool {
         mint_a: key(1),

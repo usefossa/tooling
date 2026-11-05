@@ -407,6 +407,11 @@ pub fn add_liquidity(
         "AMM liquidity",
     )?;
     let total = add(lp_supply, pool.locked_lp)?;
+    let total = if total == 0 && pool.reserve_a > 0 && pool.reserve_b > 0 {
+        integer_sqrt(u128::from(pool.reserve_a) * u128::from(pool.reserve_b))
+    } else {
+        total
+    };
     let quote = if total == 0 {
         ensure(
             pool.reserve_a == 0 && pool.reserve_b == 0,
@@ -435,7 +440,7 @@ pub fn add_liquidity(
     )?;
     add(pool.reserve_a, quote.net_a)?;
     add(pool.reserve_b, quote.net_b)?;
-    add(lp_supply, args.amount)?;
+    add(total, args.amount)?;
     Ok(quote)
 }
 pub fn remove_liquidity(

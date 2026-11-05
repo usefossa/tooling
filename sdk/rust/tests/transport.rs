@@ -258,6 +258,70 @@ fn transaction_builders_reject_packet_and_signer_overflow_without_panicking() {
 }
 
 #[tokio::test]
+async fn simulation_never_exposes_broadcastable_signatures_even_on_rpc_failure() {
+    use solana_transaction::versioned::VersionedTransaction;
+    for versioned in [false, true] {
+        for rpc_error in [false, true] {
+            let pending = if versioned {
+                let signer = signer();
+                transaction::PreparedVersionedTransaction::new(
+                    &[protocol().update_list(key(5), signer.pubkey(), key(6), true)],
+                    signer.pubkey(),
+                    &[],
+                    &rpc::LatestBlockhash {
+                        blockhash: Hash::new_from_array([8; 32]),
+                        last_valid_block_height: 100,
+                        min_context_slot: 9,
+                    },
+                )
+                .unwrap()
+                .sign(&[&signer])
+                .unwrap()
+            } else {
+                pending()
+            };
+            let expected = pending.versioned_transaction().unwrap();
+            let captured = Arc::new(Mutex::new(None));
+            let observed = captured.clone();
+            let mock = spawn_mock(move |_, _, body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(request["method"], "simulateTransaction");
+                let wire = STANDARD.decode(request["params"][0].as_str().unwrap()).unwrap();
+                let transaction: VersionedTransaction = bincode::deserialize(&wire).unwrap();
+                assert_eq!(transaction.message, expected.message);
+                *observed.lock().unwrap() = Some((transaction, request["params"][1].clone()));
+                if rpc_error {
+                    (200, json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"simulation unavailable"}}))
+                } else {
+                    rpc_response(body, json!({"context":{"slot":9},"value":{"err":{"InstructionError":[0,"Custom"]},"unitsConsumed":100}}))
+                }
+            }).await;
+            let rpc = RpcClient::new(&mock.url).unwrap();
+            let result = rpc.simulate(&pending).await;
+            assert!(result.is_err() || result.unwrap().check().is_err());
+            let (transaction, options) = captured.lock().unwrap().take().unwrap();
+            assert!(
+                transaction.verify_and_hash_message().is_err(),
+                "rpc received broadcastable simulation bytes"
+            );
+            assert!(
+                transaction
+                    .signatures
+                    .iter()
+                    .all(|signature| *signature == Signature::default())
+            );
+            assert_eq!(options["sigVerify"], false);
+            assert_eq!(options["minContextSlot"], 9);
+            assert!(pending.validate().is_ok());
+            let mut tampered = pending.clone();
+            tampered.signature = Signature::default().to_string();
+            assert!(rpc.simulate(&tampered).await.is_err());
+            assert!(captured.lock().unwrap().is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn rpc_prepare_simulate_broadcast_and_resume_use_same_signed_bytes() {
     let calls = Arc::new(Mutex::new(vec![]));
     let seen = calls.clone();
@@ -304,7 +368,7 @@ async fn rpc_prepare_simulate_broadcast_and_resume_use_same_signed_bytes() {
 async fn expiry_rechecks_history_after_finalized_height() {
     let count = Arc::new(AtomicUsize::new(0));
     let n = count.clone();
-    let mock=spawn_mock(move |_,_,body|{let q:Value=serde_json::from_slice(body).unwrap();let result=match q["method"].as_str().unwrap(){"getSignatureStatuses"=>json!({"context":{"slot":9},"value":[if n.fetch_add(1,Ordering::SeqCst)==0{Value::Null}else{json!({"slot":10,"confirmations":null,"err":null,"confirmationStatus":"finalized"})}]}),"getBlockHeight"=>{assert_eq!(q["params"][0]["commitment"],"finalized");json!(101)},m=>panic!("unexpected {m}")};rpc_response(body,result)}).await;
+    let mock=spawn_mock(move |_,_,body|{let q:Value=serde_json::from_slice(body).unwrap();let result=match q["method"].as_str().unwrap(){"getSignatureStatuses"=>json!({"context":{"slot":20},"value":[if n.fetch_add(1,Ordering::SeqCst)==0{Value::Null}else{json!({"slot":10,"confirmations":null,"err":null,"confirmationStatus":"finalized"})}]}),"getBlockHeight"=>{assert_eq!(q["params"][0]["commitment"],"finalized");json!(133)},"getEpochInfo"=>json!({"absoluteSlot":20,"blockHeight":133}),"isBlockhashValid"=>json!({"context":{"slot":20},"value":false}),m=>panic!("unexpected {m}")};rpc_response(body,result)}).await;
     RpcClient::new(&mock.url)
         .unwrap()
         .confirm(&pending(), Duration::ZERO)
@@ -315,10 +379,12 @@ async fn expiry_rechecks_history_after_finalized_height() {
         let q: Value = serde_json::from_slice(body).unwrap();
         rpc_response(
             body,
-            if q["method"] == "getBlockHeight" {
-                json!(101)
-            } else {
-                json!({"context":{"slot":9},"value":[null]})
+            match q["method"].as_str().unwrap() {
+                "getBlockHeight" => json!(133),
+                "getEpochInfo" => json!({"absoluteSlot":20,"blockHeight":133}),
+                "isBlockhashValid" => json!({"context":{"slot":20},"value":false}),
+                "getSignatureStatuses" => json!({"context":{"slot":20},"value":[null]}),
+                method => panic!("unexpected {method}"),
             },
         )
     })
@@ -327,6 +393,87 @@ async fn expiry_rechecks_history_after_finalized_height() {
         RpcClient::new(&mock.url).unwrap().submit(&pending()).await,
         Err(Error::Expired)
     ));
+}
+
+#[tokio::test]
+async fn expiry_requires_invalid_signed_blockhash_and_fresh_finalized_history() {
+    for scenario in [
+        "valid hash",
+        "recent hash",
+        "processed hash",
+        "young epoch",
+        "stale epoch",
+        "stale validity",
+        "stale confirmed validity",
+        "stale processed validity",
+        "stale history",
+        "stale processed history",
+        "finality lag",
+        "future status",
+        "grace",
+        "expired",
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let polls = calls.clone();
+        let mock = spawn_mock(move |_, _, body| {
+            let q: Value = serde_json::from_slice(body).unwrap();
+            let result = match q["method"].as_str().unwrap() {
+                "getSignatureStatuses" => {
+                    let second = polls.fetch_add(1, Ordering::SeqCst) > 0;
+                    let ahead = matches!(scenario, "finality lag" | "stale processed history");
+                    json!({"context":{"slot":if second { if scenario == "stale history" {19} else if scenario == "finality lag" {50} else {20} } else if ahead {50} else {10}},"value":[if scenario == "future status" {json!({"slot":11,"err":null,"confirmationStatus":"finalized"})} else {Value::Null}]})
+                }
+                "getBlockHeight" => json!(if scenario == "grace" {132} else {133}),
+                "getEpochInfo" => {
+                    assert_eq!(q["params"], json!([{"commitment":"finalized","minContextSlot":9}]));
+                    json!({"absoluteSlot":if scenario == "stale epoch" {8} else {20},"blockHeight":if scenario == "young epoch" {132} else {133}})
+                }
+                "isBlockhashValid" => {
+                    let commitment = q["params"][1]["commitment"].as_str().unwrap();
+                    assert!(matches!(commitment, "confirmed" | "finalized" | "processed"));
+                    assert_eq!(q["params"], json!([Hash::new_from_array([8; 32]).to_string(),{"commitment":commitment,"minContextSlot":20}]));
+                    json!({"context":{"slot":if scenario == "stale validity" || scenario == "stale confirmed validity" && commitment == "confirmed" || scenario == "stale processed validity" && commitment == "processed" {19} else {20}},"value":scenario == "valid hash" || scenario == "recent hash" && commitment == "confirmed" || scenario == "processed hash" && commitment == "processed"})
+                }
+                method => panic!("unexpected {method}"),
+            };
+            rpc_response(body, result)
+        }).await;
+        let pending = pending();
+        let before = pending.wire_base64.clone();
+        let result = RpcClient::new(&mock.url)
+            .unwrap()
+            .confirm(&pending, Duration::ZERO)
+            .await;
+        match scenario {
+            "valid hash" | "recent hash" | "processed hash" | "grace" => assert!(
+                matches!(result, Err(Error::Timeout)),
+                "{scenario}: {result:?}"
+            ),
+            "expired" | "finality lag" => {
+                assert!(matches!(result, Err(Error::Expired)), "{result:?}")
+            }
+            _ => assert!(
+                matches!(result, Err(Error::Invalid(_))),
+                "{scenario}: {result:?}"
+            ),
+        }
+        assert_eq!(pending.wire_base64, before);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if [
+                "stale history",
+                "stale processed history",
+                "expired",
+                "finality lag"
+            ]
+            .contains(&scenario)
+            {
+                2
+            } else {
+                1
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -347,7 +494,7 @@ async fn rpc_rejects_wrong_envelopes_failed_transactions_and_bad_account_encodin
             .await
             .is_err()
     );
-    let mock=spawn_mock(|_,_,body|rpc_response(body,json!({"context":{"slot":1},"value":[{"slot":1,"confirmations":1,"err":{"InstructionError":[0,{"Custom":4}]},"confirmationStatus":"confirmed"}]}))).await;
+    let mock=spawn_mock(|_,_,body|rpc_response(body,json!({"context":{"slot":1},"value":[{"slot":1,"confirmations":null,"err":{"InstructionError":[0,{"Custom":4}]},"confirmationStatus":"finalized"}]}))).await;
     assert!(matches!(
         RpcClient::new(&mock.url).unwrap().submit(&pending()).await,
         Err(Error::Transaction(_))
@@ -763,7 +910,7 @@ async fn uncertain_status_preserves_pending_bytes_and_reports_timeout() {
         Err(Error::Timeout)
     ));
     assert_eq!(pending.wire_base64, before);
-    for label in [Some("processed"), None] {
+    for label in [Some("processed"), Some("confirmed"), None] {
         let mock = spawn_mock(move |_, _, body| {
             let query: Value = serde_json::from_slice(body).unwrap();
             assert_eq!(query["method"], "getSignatureStatuses");
@@ -852,7 +999,7 @@ async fn signature_status_requires_explicit_failure_and_confirmation_evidence() 
         json!("FutureTransactionFailure"),
         json!({"FutureTransactionFailure":1}),
     ] {
-        let mock = spawn_mock(move |_, _, body| rpc_response(body, json!({"context":{"slot":1},"value":[{"slot":1,"err":error,"confirmationStatus":"confirmed"}]}))).await;
+        let mock = spawn_mock(move |_, _, body| rpc_response(body, json!({"context":{"slot":1},"value":[{"slot":1,"err":error,"confirmationStatus":"finalized"}]}))).await;
         let rpc = RpcClient::new(&mock.url).unwrap();
         assert!(matches!(
             rpc.confirm(&pending, Duration::ZERO).await,
@@ -1476,7 +1623,9 @@ async fn versioned_prepare_measures_and_resumes_exact_signed_bytes() {
                 let tx:VersionedTransaction=bincode::deserialize(&STANDARD.decode(q["params"][0].as_str().unwrap()).unwrap()).unwrap();
                 let VersionedMessage::V0(message)=&tx.message else {panic!("v0 expected")};
                 assert_eq!(message.address_table_lookups[0].account_key,key(100));
-                if q["params"][1]["sigVerify"]==true {tx.verify_and_hash_message().unwrap();assert_eq!(message.instructions[0].data,transaction::compute_unit_limit(18600).data);} else {assert_eq!(message.instructions[0].data,transaction::compute_unit_limit(1_400_000).data);}
+                assert_eq!(q["params"][1]["sigVerify"],false);
+                assert!(tx.verify_and_hash_message().is_err());
+                assert!([transaction::compute_unit_limit(18600).data,transaction::compute_unit_limit(1_400_000).data].contains(&message.instructions[0].data));
                 json!({"context":{"slot":10},"value":{"err":null,"unitsConsumed":16000}})
             },
             "sendTransaction"=>{let wire=q["params"][0].as_str().unwrap().to_owned();let tx:VersionedTransaction=bincode::deserialize(&STANDARD.decode(&wire).unwrap()).unwrap();tx.verify_and_hash_message().unwrap();captured.lock().unwrap().push(wire);json!(tx.signatures[0].to_string())},

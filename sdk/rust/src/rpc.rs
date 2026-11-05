@@ -35,6 +35,7 @@ enum Transport {
     Hosted(HostedClient),
 }
 type CachedBlockhash = tokio::sync::Mutex<Option<(tokio::time::Instant, LatestBlockhash)>>;
+pub const TRANSACTION_EXPIRY_GRACE_BLOCKS: u64 = 32;
 #[derive(Clone)]
 pub struct RpcClient {
     transport: Transport,
@@ -659,7 +660,12 @@ impl RpcClient {
     }
     pub async fn simulate(&self, pending: &PendingTransaction) -> Result<Simulation> {
         pending.validate()?;
-        let response:ContextValue<Simulation>=self.call("simulateTransaction",json!([pending.wire_base64,{"encoding":"base64","commitment":self.commitment,"sigVerify":true,"minContextSlot":pending.min_context_slot}])).await?;
+        let mut transaction = pending.versioned_transaction()?;
+        // validate signatures locally; simulation must not give the rpc broadcast authority.
+        transaction.signatures.fill(Signature::default());
+        let bytes = bincode::serialize(&transaction)
+            .map_err(|_| Error::Invalid("transaction serialization"))?;
+        let response:ContextValue<Simulation>=self.call("simulateTransaction",json!([STANDARD.encode(bytes),{"encoding":"base64","commitment":self.commitment,"sigVerify":false,"minContextSlot":pending.min_context_slot}])).await?;
         ensure(
             response.context.slot >= pending.min_context_slot,
             "RPC simulation context slot",
@@ -677,6 +683,17 @@ impl RpcClient {
         signatures: &[Signature],
         search_history: bool,
     ) -> Result<Vec<Option<SignatureStatus>>> {
+        Ok(self
+            .signature_statuses_at(signatures, search_history, 0)
+            .await?
+            .value)
+    }
+    pub async fn signature_statuses_at(
+        &self,
+        signatures: &[Signature],
+        search_history: bool,
+        minimum_slot: u64,
+    ) -> Result<ContextValue<Vec<Option<SignatureStatus>>>> {
         ensure(
             !signatures.is_empty() && signatures.len() <= 256,
             "signature batch size",
@@ -691,7 +708,11 @@ impl RpcClient {
             response.value.len() == signatures.len(),
             "signature status count",
         )?;
-        response
+        ensure(
+            response.context.slot >= minimum_slot,
+            "signature history context",
+        )?;
+        let value = response
             .value
             .into_iter()
             .map(|status| {
@@ -711,17 +732,76 @@ impl RpcClient {
                                     || status.get("confirmations").is_some()),
                             "signature status evidence",
                         )?;
-                        Ok(serde_json::from_value(status)?)
+                        let status: SignatureStatus = serde_json::from_value(status)?;
+                        ensure(
+                            status.slot <= response.context.slot,
+                            "signature history context",
+                        )?;
+                        Ok(status)
                     })
                     .transpose()
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        Ok(ContextValue {
+            context: response.context,
+            value,
+        })
+    }
+    pub async fn expired_blockhash(
+        &self,
+        pending: &PendingTransaction,
+        minimum_finalized_height: u64,
+    ) -> Result<Option<u64>> {
+        pending.validate()?;
+        let transaction = pending.versioned_transaction()?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FinalizedEpoch {
+            absolute_slot: u64,
+            block_height: u64,
+        }
+        let finalized: FinalizedEpoch = self
+            .call(
+                "getEpochInfo",
+                json!([{"commitment":"finalized","minContextSlot":pending.min_context_slot}]),
+            )
+            .await?;
+        ensure(
+            finalized.absolute_slot > 0
+                && finalized.absolute_slot >= pending.min_context_slot
+                && finalized.block_height >= minimum_finalized_height,
+            "finalized expiry context",
+        )?;
+        if finalized.block_height
+            <= pending
+                .last_valid_block_height
+                .saturating_add(TRANSACTION_EXPIRY_GRACE_BLOCKS)
+        {
+            return Ok(None);
+        }
+        let mut minimum_slot = finalized.absolute_slot;
+        for commitment in [
+            Commitment::Finalized,
+            Commitment::Confirmed,
+            Commitment::Processed,
+        ] {
+            let validity: ContextValue<bool> = self.call("isBlockhashValid", json!([transaction.message.recent_blockhash().to_string(),{"commitment":commitment,"minContextSlot":minimum_slot}])).await?;
+            ensure(
+                validity.context.slot >= minimum_slot,
+                "blockhash validity context",
+            )?;
+            if validity.value {
+                return Ok(None);
+            }
+            minimum_slot = validity.context.slot;
+        }
+        Ok(Some(minimum_slot))
     }
     pub async fn submit(&self, pending: &PendingTransaction) -> Result<Signature> {
         let signature = pending.validate()?;
         if let Some(status) = self.pending_status(pending, &signature).await? {
             if let Some(error) = &status.err
-                && status.reached(Commitment::Confirmed)
+                && status.reached(Commitment::Finalized)
             {
                 return Err(Error::Transaction(error.clone()));
             }
@@ -782,7 +862,7 @@ impl RpcClient {
             };
             if let Some(status) = status {
                 if let Some(err) = &status.err
-                    && status.reached(Commitment::Confirmed)
+                    && status.reached(Commitment::Finalized)
                 {
                     return Err(Error::Transaction(err.clone()));
                 }
@@ -805,19 +885,33 @@ impl RpcClient {
         pending: &PendingTransaction,
         signature: &Signature,
     ) -> Result<Option<SignatureStatus>> {
-        let status = self.signature_status(signature).await?;
-        if status.is_none()
-            && self
+        let mut initial = self
+            .signature_statuses_at(std::slice::from_ref(signature), true, 0)
+            .await?;
+        let status = initial.value.remove(0);
+        if status.is_none() {
+            let height = self
                 .call::<u64>("getBlockHeight", json!([{"commitment":"finalized"}]))
-                .await?
-                > pending.last_valid_block_height
-        {
-            self.invalidate_blockhash().await;
-            return self
-                .signature_status(signature)
-                .await?
-                .map(Some)
-                .ok_or(Error::Expired);
+                .await?;
+            if height
+                > pending
+                    .last_valid_block_height
+                    .saturating_add(TRANSACTION_EXPIRY_GRACE_BLOCKS)
+                && let Some(minimum_slot) = self.expired_blockhash(pending, height).await?
+            {
+                self.invalidate_blockhash().await;
+                return self
+                    .signature_statuses_at(
+                        std::slice::from_ref(signature),
+                        true,
+                        minimum_slot.max(initial.context.slot),
+                    )
+                    .await?
+                    .value
+                    .remove(0)
+                    .map(Some)
+                    .ok_or(Error::Expired);
+            }
         }
         Ok(status)
     }
