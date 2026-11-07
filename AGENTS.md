@@ -10,6 +10,7 @@ protocol CLI, Rust SDK, and canonical metadata schemas. see [tooling documentati
 
 ## workflow
 
+- dependency updates and security fixes are manual; retain vulnerability alerts and dependency inventories.
 - read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
 - deployments and package publication require an explicit request. tooling releases do not authorize onboarding, signing, program deployment, or fund movement.
 - preserve unrelated configuration, signer files, metadata commitments, and transaction journals.
