@@ -1,6 +1,6 @@
 [package]
 name = "fossa-sdk"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2024"
 publish = false
 description = "Typed Fossa protocol, metadata, RPC and transaction client"

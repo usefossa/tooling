@@ -1,6 +1,6 @@
 [package]
 name = "fossa-cli"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2024"
 publish = false
 description = "Noninteractive Fossa CLI"
