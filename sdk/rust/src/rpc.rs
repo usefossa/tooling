@@ -627,7 +627,7 @@ impl RpcClient {
             PreparedTransaction::new(
                 instructions,
                 payer,
-                latest.blockhash.clone(),
+                latest.blockhash.to_owned(),
                 latest.last_valid_block_height,
                 latest.min_context_slot,
             )

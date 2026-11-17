@@ -1,9 +1,9 @@
 [workspace]
-members = ["schema", "sdk/rust", "cli"]
+members = ["schema", "sdk/rust", "sdk/jupiter", "cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.13.4"
+version = "0.14.0"
 edition = "2024"
 publish = false
 

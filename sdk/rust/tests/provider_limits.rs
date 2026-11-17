@@ -386,7 +386,7 @@ fn thirty_two_page_booking_fits_v0_and_preserves_signed_journal_and_lookup_bindi
         PreparedTransaction::new(
             &instructions,
             owner.pubkey(),
-            latest.blockhash.clone(),
+            latest.blockhash.to_owned(),
             100,
             9
         )
