@@ -38,7 +38,7 @@ impl PreparedVersionedTransaction {
             "unique lookup tables",
         )?;
         let message =
-            v0::Message::try_compile(&payer, instructions, tables, latest.blockhash.clone())
+            v0::Message::try_compile(&payer, instructions, tables, latest.blockhash.to_owned())
                 .map_err(|_| Error::Invalid("lookup table transaction"))?;
         let transaction = VersionedTransaction {
             signatures: vec![
@@ -159,7 +159,7 @@ impl PreparedTransaction {
                 selected.push(*signer);
             }
         }
-        let blockhash = self.transaction.message.recent_blockhash.clone();
+        let blockhash = self.transaction.message.recent_blockhash.to_owned();
         self.transaction
             .try_sign(&selected, blockhash)
             .map_err(|e| Error::Signing(e.to_string()))?;
