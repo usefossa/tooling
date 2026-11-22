@@ -111,6 +111,25 @@ pub(super) fn model_checkpoint(
     let checkpoint = model.checkpoint.as_deref().or(earliest).ok_or_else(|| {
         Error::Input("Model metadata must publish at least one checkpoint identity.".into())
     })?;
+    if model
+        .input_modalities
+        .split(',')
+        .any(|name| name == "image")
+    {
+        let limit = document.value()["imageTokensByCheckpoint"]
+            .get(checkpoint)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                Error::Input(format!(
+                    "Image offers require a published image token limit for {checkpoint}."
+                ))
+            })?;
+        if limit > u64::from(model.input_bound_tokens) {
+            return Err(Error::Input(
+                "Image token limit exceeds the offer input bound.".into(),
+            ));
+        }
+    }
     crate::args::parse_checkpoint(checkpoint).map_err(Error::Input)
 }
 pub(super) fn validate_onboard(config: &Config) -> Result<()> {

@@ -216,6 +216,22 @@ mod tests {
             model_checkpoint(model, &document).unwrap(),
             address::model_id("example/model")
         );
+        model.input_modalities = "text,image".into();
+        assert!(model_checkpoint(model, &document).is_err());
+        value["modalities"]["input"] = json!(["text", "image"]);
+        value["imageTokensByCheckpoint"] = json!({"example/model": 73});
+        let document = Document::model(&model.id, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            model_checkpoint(model, &document).unwrap(),
+            address::model_id("example/model")
+        );
+        model.input_bound_tokens = 72;
+        assert!(model_checkpoint(model, &document).is_err());
+        model.input_modalities = "text".into();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("imageTokensByCheckpoint");
         value.as_object_mut().unwrap().remove("checkpoints");
         let document = Document::model(&model.id, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(model_checkpoint(model, &document).is_err());

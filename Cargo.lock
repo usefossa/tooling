@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "fossa-cli"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "fossa-metadata"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jsonschema",
  "roxmltree",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "fossa-sdk"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
