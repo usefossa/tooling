@@ -2161,18 +2161,28 @@ var BPE = class extends TokenizerModel_default {
    */
   constructor(config) {
     super(config);
-    this.tokens_to_ids = object_to_map(config.vocab);
+    // the sdk owns this parsed bundle. release each merge as its rank is indexed,
+    // before allocating the vocabulary tables. encoding only needs the indexes.
+    const merges = config.merges;
+    if (!Array.isArray(merges)) throw new Error("BPE merges must be an array");
+    const paired = Array.isArray(merges[0]);
+    this.bpe_ranks = new Map();
+    for (let rank = 0; rank < merges.length; ++rank) {
+      const pair = paired ? merges[rank] : merges[rank].split(" ", 2);
+      this.bpe_ranks.set(JSON.stringify(pair), rank);
+      merges[rank] = null;
+    }
+    config.merges = null;
+    const tokens = Object.keys(config.vocab);
+    this.vocab = new Array(tokens.length);
+    for (const token of tokens) {
+      const id = config.vocab[token];
+      this.tokens_to_ids.set(token, id);
+      this.vocab[id] = token;
+    }
+    config.vocab = null;
     this.unk_token_id = this.tokens_to_ids.get(config.unk_token);
     this.unk_token = config.unk_token;
-    this.vocab = new Array(this.tokens_to_ids.size);
-    for (const [key, value] of this.tokens_to_ids) {
-      this.vocab[value] = key;
-    }
-    const use_new_merge_format = Array.isArray(config.merges[0]);
-    this.merges = use_new_merge_format ? config.merges : config.merges.map(
-      (x) => x.split(" ", 2)
-    );
-    this.bpe_ranks = new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));
     this.end_of_word_suffix = config.end_of_word_suffix;
     this.continuing_subword_suffix = config.continuing_subword_suffix ?? null;
     this.byte_fallback = this.config.byte_fallback ?? false;
