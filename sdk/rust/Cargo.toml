@@ -1,11 +1,15 @@
 [package]
 name = "fossa-sdk"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 publish = false
 description = "Typed Fossa protocol, metadata, RPC and transaction client"
 
+[features]
+text-counter = ["dep:fossa-text-counter"]
+
 [dependencies]
+fossa-text-counter = { path = "../text-counter", optional = true }
 base64 = "0.22"
 bincode = "1.3"
 borsh = { version = "1.6", features = ["derive"] }

@@ -14,6 +14,8 @@ pub mod rpc;
 pub mod token;
 pub mod transaction;
 pub use fossa_metadata as schema;
+#[cfg(feature = "text-counter")]
+pub use fossa_text_counter as text_counter;
 
 pub use solana_address::Address as Pubkey;
 pub use solana_hash::Hash;

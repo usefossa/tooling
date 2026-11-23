@@ -196,6 +196,7 @@ pub(super) async fn offer(rt: &Runtime, command: OfferCommand) -> Result<Value> 
         OfferCommand::Update { offer, patch } => {
             let (keys, current, _) = selected_offer(rt, &offer).await?;
             let next = patch_terms(current.terms, &patch)?;
+            verify_published_offer(rt, &offer.model.model, &next).await?;
             rt.transact("update offer",vec![rt.protocol.update_offer(keys,next)?],&[],json!({"model":offer.model.model,"slot":keys.slot,"previous":current.terms,"next":next,"rate_unit":"micro-USDC per 1,000,000 tokens"})).await
         }
     }
