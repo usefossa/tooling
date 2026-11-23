@@ -39,6 +39,14 @@ pub async fn run(cli: Cli) -> Result<Value> {
     if let Command::Metadata(MetadataCommand::Validate { kind, file }) = &cli.command {
         return Ok(document_view(&document(*kind, file)?));
     }
+    if let Command::Metadata(MetadataCommand::ValidateCounter { file }) = &cli.command {
+        let bytes = read_limited(file, fossa_sdk::text_counter::MAX_BYTES)?;
+        fossa_sdk::text_counter::TextCounter::load(&bytes)
+            .map_err(|_| Error::Input("Invalid text counter bundle or reference counts".into()))?;
+        return Ok(
+            json!({"format":"huggingface-chat-v1","sha256":fossa_sdk::metadata::sha256_hex(&bytes),"bytes":bytes.len()}),
+        );
+    }
     let config = Config::load(&cli.options)?;
     if matches!(cli.command, Command::Onboard) {
         validate_onboard(&config)?;
@@ -208,6 +216,13 @@ mod tests {
         assert_eq!(
             model_checkpoint(model, &document).unwrap(),
             address::model_id("example/model@1017")
+        );
+        model.checkpoint = Some("typo".into());
+        assert!(
+            model_checkpoint(model, &document)
+                .unwrap_err()
+                .to_string()
+                .contains("example/model@1017")
         );
         model.checkpoint = None;
         value["checkpoints"].as_array_mut().unwrap().truncate(1);

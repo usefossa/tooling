@@ -111,6 +111,17 @@ pub(super) fn model_checkpoint(
     let checkpoint = model.checkpoint.as_deref().or(earliest).ok_or_else(|| {
         Error::Input("Model metadata must publish at least one checkpoint identity.".into())
     })?;
+    let published: Vec<_> = checkpoints
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    if !published.contains(&checkpoint) {
+        return Err(Error::Input(format!(
+            "Unknown checkpoint {checkpoint}. Published checkpoints: {}",
+            published.join(", ")
+        )));
+    }
     if model
         .input_modalities
         .split(',')
@@ -131,6 +142,55 @@ pub(super) fn model_checkpoint(
         }
     }
     crate::args::parse_checkpoint(checkpoint).map_err(Error::Input)
+}
+pub(super) async fn verify_published_offer(
+    rt: &Runtime,
+    id: &str,
+    terms: &OfferTerms,
+) -> Result<()> {
+    if !terms.active || terms.capacity == 0 {
+        return Ok(());
+    }
+    let model = model_address(rt, id)?;
+    let key = address::model_metadata(&rt.protocol.program, &model).0;
+    let metadata = rt
+        .rpc
+        .require_account::<ModelMetadata>(key, rt.protocol.program)
+        .await?;
+    if metadata.market != rt.protocol.market || metadata.model != model {
+        return Err(Error::Input("Model metadata binding mismatch".into()));
+    }
+    let document = Document::fetch(Kind::Model, &metadata.document).await?;
+    let value = document.value();
+    if value["id"].as_str() != Some(id) {
+        return Err(Error::Input("Model metadata id mismatch".into()));
+    }
+    let versions: Vec<_> = value["checkpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    let checkpoint = versions
+        .iter()
+        .copied()
+        .find(|id| address::model_id(id) == terms.checkpoint)
+        .ok_or_else(|| {
+            Error::Input(format!(
+                "Unknown checkpoint. Published checkpoints: {}",
+                versions.join(", ")
+            ))
+        })?;
+    if terms.input_modalities & 2 != 0
+        && !value["imageTokensByCheckpoint"][checkpoint]
+            .as_u64()
+            .is_some_and(|n| n > 0 && n <= u64::from(terms.max_input))
+    {
+        return Err(Error::Input(format!(
+            "Invalid published image token limit for {checkpoint}."
+        )));
+    }
+    Ok(())
 }
 pub(super) fn validate_onboard(config: &Config) -> Result<()> {
     let provider = &config.file.provider;

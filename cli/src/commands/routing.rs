@@ -460,6 +460,7 @@ pub async fn run(rt: &Runtime, command: Command) -> Result<Value> {
         } => {
             let m = model_keys(rt, &model).await?;
             let terms: OfferTerms = serde_json::from_slice(&std::fs::read(terms)?)?;
+            verify_published_offer(rt, &model, &terms).await?;
             vec![if rt.market.provider_limits_enabled {
                 p.set_provider_list_offer(
                     list,

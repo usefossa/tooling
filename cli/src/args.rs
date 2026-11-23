@@ -534,6 +534,9 @@ impl From<MetadataKind> for fossa_sdk::metadata::Kind {
 }
 #[derive(Subcommand, Debug)]
 pub enum MetadataCommand {
+    /// Verify a local checkpoint tokenizer bundle against its reference counts and print its digest
+    #[command(after_help = DOCS)]
+    ValidateCounter { file: PathBuf },
     /// Validate local bytes offline; print hash, size and parsed document
     #[command(after_help = DOCS)]
     Validate { kind: MetadataKind, file: PathBuf },

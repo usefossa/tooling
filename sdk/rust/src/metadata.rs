@@ -44,37 +44,71 @@ impl Document {
     pub fn verify(&self, reference: &DocumentRef) -> Result<()> {
         ensure(self.sha256 == reference.sha256, "metadata SHA-256")
     }
+    pub async fn fetch_from_api(
+        kind: Kind,
+        reference: &DocumentRef,
+        api: &str,
+        http: &reqwest::Client,
+    ) -> Result<Self> {
+        let origin = crate::hosted::validate_api_origin(api)?;
+        let url = format!("{origin}/v1/market/metadata/{}", hex(&reference.sha256));
+        if reference.uri != url {
+            return Self::fetch(kind, reference).await;
+        }
+        let bytes = crate::hosted::response_bytes(http.get(url).send().await?, MAX_BYTES).await?;
+        let doc = Self::parse(kind, bytes)?;
+        doc.verify(reference)?;
+        Ok(doc)
+    }
     pub async fn fetch(kind: Kind, reference: &DocumentRef) -> Result<Self> {
-        let url = validate_uri(&reference.uri)?;
-        let host = url
-            .host_str()
-            .ok_or(Error::Invalid("metadata host"))?
-            .trim_matches(['[', ']']);
-        let addresses = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443))),
-        )
-        .await
-        .map_err(|_| Error::Invalid("metadata DNS timeout"))??
-        .collect::<Vec<_>>();
-        ensure(
-            !addresses.is_empty() && addresses.iter().all(|a| public_ip(a.ip())),
-            "public metadata host",
-        )?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(host, &addresses)
-            .build()?;
-        let body = crate::hosted::response_bytes(http.get(url).send().await?, MAX_BYTES).await?;
+        if let Some(encoded) = reference.uri.strip_prefix("data:application/json;base64,") {
+            use base64::{Engine, engine::general_purpose::STANDARD};
+            let bytes = STANDARD
+                .decode(encoded)
+                .map_err(|_| Error::Invalid("inline metadata encoding"))?;
+            let doc = Self::parse(kind, bytes)?;
+            doc.verify(reference)?;
+            return Ok(doc);
+        }
+        let body = fetch_public_bytes(&reference.uri, MAX_BYTES).await?;
         let doc = Self::parse(kind, body)?;
         doc.verify(reference)?;
         Ok(doc)
     }
 }
+/// retrieves a bounded artifact from a dns-pinned public HTTPS origin.
+pub async fn fetch_public_bytes(uri: &str, limit: usize) -> Result<Vec<u8>> {
+    let url = public_url(uri)?;
+    let host = url
+        .host_str()
+        .ok_or(Error::Invalid("metadata host"))?
+        .trim_matches(['[', ']']);
+    let addresses = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443))),
+    )
+    .await
+    .map_err(|_| Error::Invalid("metadata DNS timeout"))??
+    .collect::<Vec<_>>();
+    ensure(
+        !addresses.is_empty() && addresses.iter().all(|a| public_ip(a.ip())),
+        "public metadata host",
+    )?;
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addresses)
+        .build()?;
+    crate::hosted::response_bytes(http.get(url).send().await?, limit).await
+}
+
 pub fn validate_uri(uri: &str) -> Result<reqwest::Url> {
     DocumentRef::new([0; 32], uri)?;
+    public_url(uri)
+}
+fn public_url(uri: &str) -> Result<reqwest::Url> {
+    ensure(uri.len() <= 2048, "metadata URL length")?;
     let url = reqwest::Url::parse(uri).map_err(|_| Error::Invalid("metadata URL"))?;
     let host = url.host_str().ok_or(Error::Invalid("metadata host"))?;
     ensure(
